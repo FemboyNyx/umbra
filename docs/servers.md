@@ -29,8 +29,8 @@ padding, anti-replay and anti-rollback) are in
 | Invites | **Every server is invite-only.** Invites are **authorized-only**: only roles with the `invite` permission (owner and admins by default) can create them | **(Nyx)** |
 | Public servers | **Not planned.** No public or listed servers | **(Nyx)** |
 | Discovery | **Umbra runs no directory and no bootstrap.** The app only joins (by invite), creates, and shows your servers. User-added directories are a **proposed extension**, pending Nyx | **(Nyx)**, extension pending |
-| History for new members | **On by default**: new members can read earlier history. Configurable per server and per channel. "History from join" is the alternative setting | **(Nyx)**, confirm with Nyx (see open questions) |
-| Identity | A **default identity** used across servers, which users can customise per server (per-server profile). A **separate identity per server** is an option | **(Nyx)**, confirm with Nyx (see open questions) |
+| History for new members | **On by default**: new members can read earlier history. Configurable per server and per channel. "History from join" is the alternative setting | **Decided (Nyx)**, confirmed |
+| Identity | A **default identity** used across servers, which users can customise per server (per-server profile). A **separate identity per server** is an option | **Decided (Nyx)**, confirmed |
 | Bans | Enforced by rotation and host ACLs. A banned member keeps whatever they already decrypted or hold keys for | Agrees with Chi, with that limit stated plainly |
 | Files | Chunked, content-addressed, one key per file, fetched over a separate `/umbra/blob/1` | Agrees with Chi. Adds that fetching reveals your IP to whoever serves the chunks |
 | Limits | **250 members, 100 MiB per file, 30-day host ciphertext retention** | Decided |
@@ -927,7 +927,7 @@ can't forge them. Nothing in phases 0 to 3 depends on this.
 
 ## Identity across servers
 
-**Decided (Nyx), to confirm with Nyx: a default identity that users can
+**Decided (Nyx, confirmed): a default identity that users can
 customise per server.**
 
 | Option | What it is | Linkability |
@@ -1391,18 +1391,16 @@ inside Olm signals. For groups there are two options:
    directory or bootstrap, and the app only joins, creates and shows your
    servers. **Still open:** whether to add the proposed user-added directories
    extension.
-4. **History default.** Decided as **on by default, configurable per server
-   and per channel**, with "history from join" as the alternative, as Nyx
-   said. **Confirm with Nyx**, because a later relayed decision said
-   otherwise.
+4. ~~**History default.**~~ **Decided (Nyx, confirmed):** on by default,
+   configurable per server and per channel, with "history from join" as the
+   alternative setting.
 5. ~~**Limits:** 250 members, 100 MiB files, 30-day host retention?~~
    **Decided:** yes. The 30 days is host ciphertext retention.
 6. ~~**DMs from server members** who aren't contacts?~~ **Decided:** they
    arrive as message requests.
-7. **Identity across servers.** Decided as **a default identity that users can
-   customise per server**, with a separate identity per server as an option,
-   as Nyx said. **Confirm with Nyx**, because a later relayed decision said
-   otherwise.
+7. ~~**Identity across servers.**~~ **Decided (Nyx, confirmed):** a default
+   identity that users can customise per server, with a separate identity per
+   server as an option.
 8. ~~**GIF provider?**~~ **Decided (Nyx):** none at launch. GIFs are encrypted
    file attachments, plus server packs. No API key and no external search.
 9. ~~**Owner recovery:** required or optional?~~ **Decided:** required at
