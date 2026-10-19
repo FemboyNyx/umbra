@@ -1,0 +1,35 @@
+[package]
+name = "umbra-tor"
+version = "0.1.0"
+edition = "2021"
+# Transitive idna/icu from libp2p currently need >=1.88; use rustup stable on this box.
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+description = "Optional Tor (arti) transport spike for Umbra's libp2p stack"
+publish = false
+readme = "README.md"
+
+[features]
+default = []
+# Embed arti-client. Without this feature the crate is a cheap stub (multiaddr
+# helpers + SOCKS design) so the workspace stays lean on mobile / CI without Tor.
+tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util"]
+
+[dependencies]
+futures = "0.3"
+libp2p = { version = "0.55", default-features = false, features = ["tokio"] }
+thiserror = "2"
+tracing = "0.1"
+
+# arti 0.35: last line that documented MSRV 1.85.1; API used below matches this series.
+# Newer arti (0.47) needs rustc 1.92 — fine on rustup stable, but pin for reproducible spike.
+arti-client = { version = "0.35", optional = true, default-features = false, features = ["tokio", "rustls", "compression", "onion-service-client"] }
+tor-rtcompat = { version = "0.35", optional = true, default-features = false, features = ["tokio", "rustls"] }
+tokio-util = { version = "0.7", optional = true, features = ["compat"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "dial_info"
+required-features = []
