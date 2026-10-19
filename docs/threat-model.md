@@ -46,7 +46,7 @@ with messages after they're decrypted.
 | A key gets swapped after the contact is added | Changed keys are refused in `add_contact`, in `Hello` (`Malformed`), and in one-time-key responses | **The user isn't told.** A `Hello` with changed keys only logs a warning, and there's no `CoreEvent`. Recommendation: emit a `KeyChanged` event so **(app)** can show it |
 | `ik` isn't signed by `ed` | `ik` is only accepted from the card or from a Noise session authenticated as that PeerId | Fine for now. Signing `ik` with `ed` in the card would let any copy of the card be checked on its own |
 | One-time key abuse | Only contacts can claim OTKs. Each claim makes a fresh OTK (falling back to the fallback key), and the response's `identity_key` has to match the pinned one | A malicious contact can claim over and over. vodozemac keeps only a limited number of OTKs, so that could push out a key another contact claimed but hasn't used yet, and that contact's first message would fail with `DecryptFailed` and then retry. Rate-limit claims per peer |
-| Replay | Olm message indices and ratchet state | None for Olm. The app has to treat message IDs as unique too |
+| Replay | Olm message indices and ratchet state | None for Olm. The app has to treat message IDs as unique too. Megolm (servers) doesn't reject replays itself, so core has to keep a replay record ([message-protection.md](message-protection.md#anti-replay)) |
 | Compromise of current session keys | The Double Ratchet gives forward secrecy and heals after a compromise | The newest 4 sessions per peer are kept |
 | Call media MITM | SDP only travels as an Olm `Signal` payload | **(calls)** has to reject SDP from any other source, and that's the most important invariant for calls |
 | Oversized input | Text and signals capped at 64 KiB, `call_id` at 128 bytes, request timeouts | The CBOR and JSON decoders run on peer input and should be fuzzed |
@@ -61,7 +61,7 @@ with messages after they're decrypted.
 | PeerIds never change, so they're trackable | None | **High.** Every relay and DHT node sees the same ID across networks. Rotating routing IDs is future work |
 | mDNS broadcasts on the LAN | Off unless `enable_mdns`, and always off with Tor | **(app)** should keep it off by default and explain what it does |
 | A peer learns your IP during a call | None in core | **(calls)/(app)** have to warn before a call or force TURN, especially in Tor mode |
-| Size and timing analysis | None. No padding | Messages leak their length. Padding buckets are on the list |
+| Size and timing analysis | None. No padding | Messages leak their length. Padding buckets and timing toggles are proposed in [message-protection.md](message-protection.md#padding) |
 | Strangers probe whether you're online | A `Hello` from a non-contact gets `NotAContact` | Even a refusal confirms the peer is online, and every probe makes a `ContactRequest` event |
 
 ### Availability and abuse
@@ -79,8 +79,8 @@ with messages after they're decrypted.
 | Threat | Mitigation in code | What's left |
 | --- | --- | --- |
 | A stolen or seized locked device | SQLCipher database, plus pickles encrypted with an HKDF-derived key | Only as strong as the OS keystore that holds `db_key` **(app)**. Linux without Secret Service needs a passphrase fallback (Argon2id) |
-| A stolen unlocked device | None in core | **(app)**: optional app lock. Disappearing messages are designed in [servers.md](servers.md#disappearing-messages) (best effort: recipients can still screenshot, copy or run a modified client) |
-| Backups copy the database | The database is encrypted | **(app)**: Android `allowBackup="false"` and data extraction rules, so `db_key` and the database aren't backed up together |
+| A stolen unlocked device | None in core | **(app)**: optional app lock (soft and hard lock, see [message-protection.md](message-protection.md#app-lock)). Disappearing messages are designed in [servers.md](servers.md#disappearing-messages) (best effort: recipients can still screenshot, copy or run a modified client) |
+| Backups copy the database | The database is encrypted | **(app)**: Android `allowBackup="false"` and data extraction rules, so `db_key` and the database aren't backed up together. A restored old copy could resurrect deleted messages and reuse ratchet state; detection via peers' sequence numbers is in [message-protection.md](message-protection.md#anti-rollback) |
 | Keys left in memory | `Zeroizing` on the `db_key` pragma, device key bytes, and the pickle key | The Olm account and sessions are in memory while running. Dart strings with plaintext can't be wiped |
 | Plaintext in logs | Core logs PeerIds and events, not message bodies | Needs a check that no `Debug` print of a `Payload` reaches logs |
 
@@ -126,6 +126,9 @@ These are checked against `119c53b`.
 6. **core:** padding buckets for `Payload`, and fuzzing for the CBOR and JSON
    decoders.
 7. **core:** consider signing `ik` with `ed` in the card.
+8. **core/app:** the message-protection items ranked in
+   [message-protection.md](message-protection.md#ranked-value-versus-cost),
+   starting with anti-replay, padding and anti-rollback.
 
 ## Before calling it secure
 

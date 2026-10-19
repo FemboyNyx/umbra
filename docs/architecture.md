@@ -123,7 +123,10 @@ crypto.
   intended recipient's PeerId and is checked after decryption, so ciphertext
   sent to the wrong peer is rejected. `body` is `Text` or `Signal`.
 - **Not implemented yet:** groups (Megolm), attachments, padding, and
-  disappearing messages.
+  disappearing messages. Groups and disappearing messages are designed in
+  [servers.md](servers.md). Padding, anti-replay, anti-rollback, app lock and
+  the other device-side protections are in
+  [message-protection.md](message-protection.md).
 
 ## Wire protocols
 
@@ -234,7 +237,7 @@ secrets. The details are in [ci.md](ci.md).
 1. Who runs the bootstrap and relay nodes, and whether core ships defaults.
 2. Groups: Megolm, and how rotation works. Proposed in [servers.md](servers.md).
 3. Attachments: how they're sent, the cipher, and size limits.
-4. Padding message sizes.
+4. Padding message sizes. Proposed in [message-protection.md](message-protection.md#padding).
 5. TURN policy for calls, and what the UI says about the IP leak.
 6. Whether the `ik` should be signed with `ed` in the card. Defense in depth,
    see the threat model.
