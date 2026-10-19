@@ -2,8 +2,7 @@
 
 Guide to Umbra's GitHub Actions workflows, secrets, and local packaging.
 Workflow YAML lives under `.github/workflows/` (owned by Cali). Packaging
-scripts and identity snippets live under [`packaging/`](../packaging/README.md)
-(owned by packaging).
+scripts and identity snippets live under [`packaging/`](../packaging/README.md).
 
 > Never commit real keystores, PFX files, or secret values. Examples below use
 > placeholders only.
@@ -28,8 +27,8 @@ runs on the same ref.
 | `rust-core` | `has_core == true` | `cargo fmt --check`, `clippy -D warnings`, `cargo test --all-features` in `core/` (stable toolchain + Swatinem/rust-cache) | — |
 | `flutter-analyze` | `has_app == true` | `flutter pub get`, `analyze`, `test` in `app/` | — |
 | `build-android` | `has_app == true` | Java 17, configure signing from secrets (or debug fallback), `flutter build apk`, upload APK(s) | `umbra-android-apk` |
-| `build-windows` | `has_app == true` | `flutter build windows --release`, zip `build/windows/x64/runner/Release/*` | `umbra-windows-zip` (`umbra-windows.zip`) |
-| `build-linux` | `has_app == true` | Install GTK/clang/ninja deps, `flutter build linux --release`, `tar` the bundle | `umbra-linux-targz` (`umbra-linux.tar.gz`) |
+| `build-windows` | `has_app == true` | `flutter build windows --release`, then `packaging/windows/build-zip.ps1`; optional MSIX when cert secrets + `msix` in pubspec | `umbra-windows` (`dist/*.zip`, optional `dist/*.msix`) |
+| `build-linux` | `has_app == true` | GTK/clang/ninja + fuse deps, install `appimagetool`, `flutter build linux --release`, then `packaging/linux/build-tarball.sh` and `build-appimage.sh` | `umbra-linux` (`dist/*.tar.gz`, `dist/*.AppImage`) |
 | `ci-gate` | always | Fails the workflow if any non-skipped package job failed; skipped jobs (missing `core/` or `app/`) are OK | — |
 
 **Skip-when-missing behavior**
@@ -39,15 +38,20 @@ Downstream jobs use `if: needs.detect.outputs.has_core == 'true'` (or
 `has_app`). Until those trees land, Rust/Flutter jobs are **skipped**, not
 failed, and `ci-gate` still passes.
 
-**Pending / not in CI yet**
+**Version strings in CI artifacts**
 
-- No AppImage job (release staging already accepts `*.AppImage` if present).
-- No MSIX build; Windows ships as zip only.
+- Linux / Windows packaging uses the short git SHA (`github.sha` truncated to 7
+  chars) as `UMBRA_VERSION` / `-Version`, e.g. `umbra-abc1234-linux-x64.tar.gz`,
+  `Umbra-abc1234-x86_64.AppImage`, `umbra-abc1234-windows-x64.zip` (CI writes the
+  zip as `dist/umbra-windows-x64.zip` but passes the short SHA as `-Version`).
+
+**Pending / not wired yet**
+
 - No explicit Android NDK / `flutter_rust_bridge` (cargokit) setup — may be
-  required once `core/` is wired into the Flutter build.
-- Workflows do **not** call `packaging/linux/build-*.sh` or
-  `packaging/windows/build-zip.ps1` (they inline `tar` / `Compress-Archive`).
-  See [Packaging scripts](#packaging-scripts-local--ci) below.
+  required once `core/` is linked into the Flutter build.
+- MSIX still needs Copilot to add the `msix` pub dependency + `msix_config` in
+  `app/pubspec.yaml`; without that, Windows stays zip-only even if cert secrets
+  exist.
 
 ---
 
@@ -66,8 +70,8 @@ failed, and `ci-gate` still passes.
 | `detect` | always | Same `has_core` / `has_app` detection as CI |
 | `rust-core` | `has_core` | `cargo test --all-features` (no fmt/clippy on the release path) |
 | `build-android` | `has_app` | Same signing + APK build as CI; artifact `umbra-android-apk` |
-| `build-windows` | `has_app` | Same zip as CI; artifact `umbra-windows-zip` |
-| `build-linux` | `has_app` | Same tar.gz as CI; artifact `umbra-linux-targz` |
+| `build-windows` | `has_app` | Same `build-zip.ps1` + optional MSIX as CI; version from tag (`v0.1.0` → `0.1.0`); artifact `umbra-windows` |
+| `build-linux` | `has_app` | Same `appimagetool` + `build-tarball.sh` / `build-appimage.sh` as CI; version from tag with leading `v` stripped; artifact `umbra-linux` |
 | `publish` | after builds (always, if detect succeeded) | Download artifacts, flatten into `release-assets/`, write `SHA256SUMS`, create GitHub Release via `softprops/action-gh-release@v2` |
 
 **Release assets**
@@ -77,19 +81,21 @@ Copied into the release when present:
 - `*.apk`
 - `*.zip`
 - `*.tar.gz`
-- `*.AppImage` (accepted if produced; **not built** by the workflow today)
-- `*.msix` (accepted if produced; **not built** by the workflow today)
-- `SHA256SUMS` (always written over whatever landed in `release-assets/`)
+- `*.AppImage`
+- `*.msix` (only if optional MSIX step produced one)
+- `SHA256SUMS` (checksums of everything in `release-assets/`)
+
+Typical filenames for tag `v0.1.0`:
+
+- `umbra-0.1.0-linux-x64.tar.gz`
+- `Umbra-0.1.0-x86_64.AppImage`
+- `umbra-0.1.0-windows-x64.zip`
+- Flutter APK name(s) under `app/build/app/outputs/flutter-apk/`
+- optional `*.msix`
 
 If `app/` is missing and no binaries were uploaded, the publish job attaches a
 placeholder `README-release.txt` plus `SHA256SUMS` so the tag still gets a
 notes-only release.
-
-**Pending on the release path**
-
-- No AppImage (`appimagetool`) step.
-- No MSIX step / no use of `WINDOWS_CERT_*` secrets in YAML.
-- Packaging helper scripts under `packaging/` are not invoked.
 
 ---
 
@@ -97,7 +103,7 @@ notes-only release.
 
 1. Ensure `main` (or the commit you intend to ship) is green on CI once `app/`
    / `core/` exist.
-2. Create an annotated or lightweight tag matching `v*`:
+2. Create and push a tag matching `v*`:
 
    ```bash
    git tag -a v0.1.0 -m "Umbra v0.1.0"
@@ -106,7 +112,7 @@ notes-only release.
 
 3. The **Release** workflow runs on that tag push.
 4. When builds succeed, GitHub creates **Umbra vX.Y.Z** with generated notes
-   and attaches whatever platform artifacts were produced, plus **SHA256SUMS**.
+   and attaches platform artifacts plus **SHA256SUMS**.
 5. Verify checksums locally:
 
    ```bash
@@ -136,18 +142,22 @@ Both `ci.yml` and `release.yml` decode the keystore to
 `ANDROID_KEYSTORE_BASE64` is non-empty. Those files must stay gitignored
 (`key.properties`, `*.jks`, `*.keystore`).
 
-### Optional (documented for packaging / future MSIX)
+### Optional — Windows MSIX
 
 | Secret | Purpose |
 |--------|---------|
 | `WINDOWS_CERT_BASE64` | Base64-encoded `.pfx` for MSIX code signing |
 | `WINDOWS_CERT_PASSWORD` | PFX password |
 
-These are **not referenced** by the current workflow YAML. When MSIX is wired
-up, missing cert secrets should keep Windows on **zip only** (see
-[`packaging/windows/README.md`](../packaging/windows/README.md)).
+Used by the **Optional MSIX** step in CI and Release. The step exits cleanly
+(zip only) when either secret is missing **or** `app/pubspec.yaml` has no
+`msix:` dependency line. When both secrets and the pub config are present, the
+workflow writes a PFX under `$RUNNER_TEMP`, sets `MSIX_CERTIFICATE_PATH` /
+`MSIX_CERTIFICATE_PASSWORD`, runs `flutter pub run msix:create`, and copies
+`*.msix` into `dist/`.
 
-`GITHUB_TOKEN` is provided automatically for `softprops/action-gh-release`.
+`*.pfx` is gitignored. `GITHUB_TOKEN` is provided automatically for
+`softprops/action-gh-release`.
 
 ---
 
@@ -189,46 +199,47 @@ Gradle must read `key.properties` the way Copilot wires
 - Artifacts are still uploaded. Treat debug-signed APKs as **non-official**;
   do not distribute them as production builds.
 
-**Windows cert secrets**
+**Windows MSIX**
 
-- Unused by current YAML. Packaging docs: without `WINDOWS_CERT_*`, ship zip
-  only (no MSIX).
+- Missing `WINDOWS_CERT_BASE64` or `WINDOWS_CERT_PASSWORD` → log and ship
+  **zip only** (job still succeeds).
+- Secrets present but no `msix:` entry in `app/pubspec.yaml` → same zip-only
+  skip.
+- Zip packaging always runs via `packaging/windows/build-zip.ps1`.
 
 ---
 
-## Packaging scripts (local / CI)
+## Packaging scripts (local and CI)
 
 Identity, icons, desktop/AppStream metadata, and helper scripts:
 
 → **[`packaging/README.md`](../packaging/README.md)**
 
+CI and Release call these after Flutter builds:
+
+| Script | Invoked as |
+|--------|------------|
+| `packaging/linux/build-tarball.sh` | `… "$BUNDLE" "dist/umbra-${VER}-linux-x64.tar.gz"` |
+| `packaging/linux/build-appimage.sh` | `… "$BUNDLE" "dist/Umbra-${VER}-x86_64.AppImage"` (runner installs `appimagetool` first) |
+| `packaging/windows/build-zip.ps1` | `-BundleDir app/build/windows/x64/runner/Release -OutFile dist/… -Version $ver` |
+
 Local examples (after a Flutter release build):
 
 ```bash
-# Linux tarball (adds .desktop / metainfo / icon into the archive layout)
+# Linux tarball
 packaging/linux/build-tarball.sh app/build/linux/x64/release/bundle
 
 # Linux AppImage (requires appimagetool on PATH)
 packaging/linux/build-appimage.sh app/build/linux/x64/release/bundle
+```
 
-# Windows zip (PowerShell)
+```powershell
+# Windows zip
 packaging/windows/build-zip.ps1 -BundleDir app/build/windows/x64/runner/Release
 ```
 
-### CI vs packaging scripts (current mismatch)
-
-As of the workflows in this repo:
-
-| Artifact | Workflow behavior today | Packaging helper |
-|----------|-------------------------|------------------|
-| Linux tar.gz | Inline `tar -C …/bundle -czf umbra-linux.tar.gz .` | `packaging/linux/build-tarball.sh` (not called) |
-| Linux AppImage | Not built | `packaging/linux/build-appimage.sh` |
-| Windows zip | Inline `Compress-Archive` → `umbra-windows.zip` | `packaging/windows/build-zip.ps1` (not called) |
-| Windows MSIX | Not built | Notes + `msix` pubspec snippet under `packaging/windows/` |
-
-Prefer calling the packaging scripts from CI when Cali next touches the
-workflows so release layouts stay consistent with local builds (desktop file,
-AppStream metainfo, versioned filenames, AppImage).
+Optional env for the shell scripts: `UMBRA_VERSION`, `DEST_DIR`, `APPIMAGETOOL`,
+`ARCH` (see script headers / packaging README).
 
 ---
 
@@ -240,12 +251,13 @@ AppStream metainfo, versioned filenames, AppImage).
 | `ci-gate` / release publish fails | A build job `failed` or `cancelled` (not `skipped`) | Open the failed job log; fix compile/test errors |
 | Android APK is debug / won't install as update over release | Signing secrets missing or `key.properties` not consumed by Gradle | Set all four `ANDROID_*` secrets; confirm Copilot applied the signing snippet |
 | `key.properties` / `.jks` shows up in `git status` | Accidental local signing files | They are gitignored; delete or move them out of the tree — never commit |
-| Linux Flutter build fails on missing GTK / clang | Dep install step failed or ran on wrong OS | Job must be `ubuntu-latest` with the `apt-get` deps from `ci.yml` |
-| Windows zip empty / upload error | `flutter build windows` failed or path drifted | Confirm `app/build/windows/x64/runner/Release` exists on the runner |
+| Linux Flutter build fails on missing GTK / clang | Dep install step failed | Job must be `ubuntu-latest` with the `apt-get` deps from the workflow (including `fuse` / `libfuse2` for AppImage) |
+| AppImage step fails on `appimagetool` | Download/install step failed or FUSE unavailable | Check the "Install appimagetool" log; confirm `fuse`/`libfuse2` installed |
+| Windows zip empty / upload error | `flutter build windows` failed or `build-zip.ps1` path wrong | Confirm `app/build/windows/x64/runner/Release` exists; packaging scripts must be on the branch |
+| No MSIX on the release | Cert secrets missing and/or no `msix` in pubspec | Expected zip-only; add `WINDOWS_CERT_*` and Copilot's `msix_config` to get MSIX |
 | Tag push did nothing | Tag does not match `v*` | Use `v0.1.0`, not `0.1.0` |
 | Release has only `README-release.txt` | No successful app artifacts (e.g. `app/` missing) | Expected until the client builds; re-tag after `app/` lands |
-| Want AppImage / MSIX on the release | Not implemented in workflow YAML yet | Build locally via packaging scripts, or extend `release.yml` (Cali) |
-| Checksum mismatch after download | Partial download or mirrored corrupt file | Re-download; compare to `SHA256SUMS` on the Release page |
+| Checksum mismatch after download | Partial download or corrupt mirror | Re-download; compare to `SHA256SUMS` on the Release page |
 
 For app identity (`io.github.femboynyx.umbra`), icons, and platform snippets, see
 [`packaging/README.md`](../packaging/README.md). For optional Tor routing design,
