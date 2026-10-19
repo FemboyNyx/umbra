@@ -38,7 +38,7 @@ Pinned with Elite:
 
 - `libp2p` **0.55** (workspace pin)
 - `arti-client` **0.35** / rusqlite **0.37** (umbra-tor enables arti `static-sqlite` so CI/Android need no system libsqlite3)
-- MSRV **1.89** (vodozemac 0.11)
+- MSRV from `core/rust-toolchain.toml` (currently **1.99.1**, vodozemac 0.11)
 
 #### Custom state / cache dirs (Android)
 
@@ -110,7 +110,7 @@ transport. Use SOCKS **instead of** clearnet TCP on that swarm, not beside it.
 ## How to build / test this crate
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"   # rustup stable >= 1.89
+export PATH="$HOME/.cargo/bin:$PATH"   # rustup toolchain matching `core/rust-toolchain.toml`
 cd core/tor
 cargo fmt
 cargo test

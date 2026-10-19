@@ -48,9 +48,13 @@ jobs:
         working-directory: core
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain-file: core/rust-toolchain.toml
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          # rustup 1.28+ no longer auto-installs on `rustup show`
+          rustup toolchain install
+          rustup show
+          rustc --version
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
@@ -107,10 +111,15 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: dtolnay/rust-toolchain@master
+      - name: Install Rust toolchain (from rust-toolchain.toml)
         if: needs.detect.outputs.has_core == 'true'
-        with:
-          toolchain-file: core/rust-toolchain.toml
+        working-directory: core
+        run: |
+          set -euo pipefail
+          # rustup 1.28+ no longer auto-installs on `rustup show`
+          rustup toolchain install
+          rustup show
+          rustc --version
       - uses: Swatinem/rust-cache@v2
         if: needs.detect.outputs.has_core == 'true'
         with:
@@ -120,14 +129,6 @@ jobs:
         with:
           ndk-version: r26d
           link-to-sdk: true
-      - name: Install Android Rust targets (for flutter_rust_bridge / cargokit)
-        if: needs.detect.outputs.has_core == 'true'
-        run: |
-          rustup target add \
-            aarch64-linux-android \
-            armv7-linux-androideabi \
-            x86_64-linux-android \
-            i686-linux-android
       - name: Export NDK for cargokit
         run: |
           echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"

@@ -24,9 +24,9 @@ runs on the same ref.
 | Job | When it runs | What it does | Artifacts |
 |-----|--------------|--------------|-----------|
 | `detect` | always | Sets `has_core` / `has_app` from `core/Cargo.toml` and `app/pubspec.yaml` | — |
-| `rust-core` | `has_core == true` | Rust **1.89** via rustup, then `cargo fmt --check`, `cargo clippy --locked …`, `cargo test --locked --all-features` in `core/` (+ Swatinem/rust-cache) | — |
+| `rust-core` | `has_core == true` | Rust from `core/rust-toolchain.toml` via `rustup toolchain install`, then `cargo fmt --check`, `cargo clippy --locked …`, `cargo test --locked --all-features` in `core/` (+ Swatinem/rust-cache) | — |
 | `flutter-analyze` | `has_app == true` | `flutter pub get`, enforce `flutter_rust_bridge` `=2.13.0` when present in pubspec, then `analyze` / `test` | — |
-| `build-android` | `has_app == true` | Java 17, NDK r26d, optional Android Rust 1.89 targets, `perl`+`make` (SQLCipher/OpenSSL), signing or debug fallback, `flutter build apk` | `umbra-android-apk` |
+| `build-android` | `has_app == true` | Java 17, NDK r26d, Android targets from `core/rust-toolchain.toml`, `perl`+`make` (SQLCipher/OpenSSL), signing or debug fallback, `flutter build apk` | `umbra-android-apk` |
 | `build-windows` | `has_app == true` | `flutter build windows --release`, then `packaging/windows/build-zip.ps1`; optional MSIX when cert secrets + `msix` in pubspec | `umbra-windows` (`dist/*.zip`, optional `dist/*.msix`) |
 | `build-linux` | `has_app == true` | GTK/clang/ninja + fuse deps, install `appimagetool`, `flutter build linux --release`, then `packaging/linux/build-tarball.sh` and `build-appimage.sh` | `umbra-linux` (`dist/*.tar.gz`, `dist/*.AppImage`) |
 | `ci-gate` | always | Fails the workflow if any non-skipped package job failed; skipped jobs (missing `core/` or `app/`) are OK | — |
@@ -45,14 +45,15 @@ failed, and `ci-gate` still passes.
   `Umbra-abc1234-x86_64.AppImage`, `umbra-abc1234-windows-x64.zip` (CI writes the
   zip as `dist/umbra-windows-x64.zip` but passes the short SHA as `-Version`).
 
-**Rust toolchain (1.89+)**
+**Rust toolchain (`core/rust-toolchain.toml` only)**
 
-`vodozemac` 0.11 needs **Rust 1.89 or newer**. That floor is pinned in
-`core/rust-toolchain.toml` (so local `cargo`/`rustc` via rustup pick it up) and
-CI/Release install the same channel explicitly with
-`dtolnay/rust-toolchain@master` and `toolchain: "1.89"` — honoring that pin.
-Always use **rustup**-managed toolchains, never the runner's or distro system
-`rustc` (often far too old).
+The channel, components (`clippy`, `rustfmt`), and Android targets are pinned
+**only** in [`core/rust-toolchain.toml`](../core/rust-toolchain.toml) (currently
+**1.99.1**). When `core/` exists, CI/Release run `rustup toolchain install` from
+`core/` — rustup 1.28+ no longer auto-installs on `rustup show`. Do not hardcode
+the version in workflow YAML. Always use rustup-managed `rustc`, never the
+system compiler.
+
 
 **Cargo workspace and `--locked`**
 
@@ -72,15 +73,14 @@ Java 17, before Flutter):
    `ANDROID_NDK_ROOT` from `steps.setup-ndk.outputs.ndk-path` into `$GITHUB_ENV`
    so cargokit can find the NDK.
 2. **Rust for Android** — only when `has_core == true`:
-   - `dtolnay/rust-toolchain@master` with `toolchain: "1.89"`
+   - `rustup toolchain install` in `core/` (picks channel/components/targets from `rust-toolchain.toml`)
    - `Swatinem/rust-cache@v2` with `workspaces: core`
    - `rustup target add` for `aarch64-linux-android`, `armv7-linux-androideabi`,
      `x86_64-linux-android`, and `i686-linux-android`
 3. **`perl` and `make`** — always installed (`sudo apt-get install -y perl make`).
    SQLCipher builds OpenSSL as part of the native stack and needs both.
 
-The host `rust-core` job installs the same **1.89** toolchain (with `rustfmt`
-and `clippy` on CI) through `dtolnay/rust-toolchain@master`.
+The host `rust-core` job uses the same `rustup toolchain install` path; `clippy`/`rustfmt` come from the toml `components` list.
 
 **flutter_rust_bridge pin (=2.13.0)**
 
@@ -116,8 +116,8 @@ Keep the Dart package, codegen, and Rust FRB crates on that exact version
 | Job | When | What |
 |-----|------|------|
 | `detect` | always | Same `has_core` / `has_app` detection as CI |
-| `rust-core` | `has_core` | Rust **1.89**, then `cargo test --locked --all-features` (no fmt/clippy on the release path) |
-| `build-android` | `has_app` | Same NDK / Rust 1.89 targets / perl+make / signing + APK build as CI; artifact `umbra-android-apk` |
+| `rust-core` | `has_core` | Rust from `core/rust-toolchain.toml`, then `cargo test --locked --all-features` (no fmt/clippy on the release path) |
+| `build-android` | `has_app` | Same NDK / rust-toolchain.toml targets / perl+make / signing + APK build as CI; artifact `umbra-android-apk` |
 | `build-windows` | `has_app` | Same `build-zip.ps1` + optional MSIX as CI; version from tag (`v0.1.0` → `0.1.0`); artifact `umbra-windows` |
 | `build-linux` | `has_app` | Same `appimagetool` + `build-tarball.sh` / `build-appimage.sh` as CI; version from tag with leading `v` stripped; artifact `umbra-linux` |
 | `publish` | after builds (always, if detect succeeded) | Download artifacts, flatten into `release-assets/`, write `SHA256SUMS`, create GitHub Release via `softprops/action-gh-release@v2` |
@@ -300,7 +300,7 @@ Optional env for the shell scripts: `UMBRA_VERSION`, `DEST_DIR`, `APPIMAGETOOL`,
 | Android APK is debug / won't install as update over release | Signing secrets missing or `key.properties` not consumed by Gradle | Set all four `ANDROID_*` secrets; confirm Copilot applied the signing snippet |
 | `key.properties` / `.jks` shows up in `git status` | Accidental local signing files | They are gitignored; delete or move them out of the tree — never commit |
 | Android native / cargokit build fails looking for NDK | `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` not set or wrong NDK | Confirm `nttld/setup-ndk` ran with `r26d` and the export step; local builds should point those env vars at an r26d install |
-| `cargo` / FRB fails with edition or vodozemac/libp2p compile errors on CI | Toolchain older than **1.89**, or system `rustc` used instead of rustup | CI installs `toolchain: "1.89"` via `dtolnay/rust-toolchain@master`; locally honor `core/rust-toolchain.toml` and ensure `rustc` is from rustup (`which rustc`) |
+| `cargo` / FRB fails with edition or vodozemac/libp2p compile errors on CI | Toolchain older than `core/rust-toolchain.toml`, or system `rustc` used instead of rustup | CI runs `rustup toolchain install` in `core/`; locally honor `core/rust-toolchain.toml` and ensure `rustc` is from rustup (`which rustc`) |
 | `cargo … --locked` fails (lock file out of date / missing) | `core/Cargo.lock` not committed or not updated after dependency edits | Run `cargo update` (or regenerate the lock) in `core/`, commit `Cargo.lock`, re-push |
 | Android / cargokit build fails compiling OpenSSL / SQLCipher | Missing `perl` or `make` on the builder | CI installs both; locally `sudo apt-get install -y perl make` (or equivalent) |
 | `flutter-analyze` fails on flutter_rust_bridge pin | pubspec has FRB but not `=2.13.0` | Pin `flutter_rust_bridge: =2.13.0` in `app/pubspec.yaml` (or remove the dep until ready) |
