@@ -7,6 +7,7 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "umbra_keystore.h"
+#include "umbra_screen.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
@@ -76,6 +77,7 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   umbra_register_keystore(view);
+  umbra_register_screen(view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

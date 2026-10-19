@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/widgets.dart';
 import 'package:path_provider/path_provider.dart';
@@ -10,6 +11,8 @@ import 'src/calls/outgoing_call.dart';
 import 'src/calls/webrtc_audio_probe.dart';
 import 'src/core/core_factory.dart';
 import 'src/keystore/db_key_store.dart';
+import 'src/lock/lock_copy.dart';
+import 'src/lock/platform_lock.dart';
 import 'src/settings/settings_store.dart';
 import 'src/state/umbra_controller.dart';
 import 'src/ui/umbra_app.dart';
@@ -25,6 +28,10 @@ Future<void> main() async {
       final dir = await getApplicationSupportDirectory();
       return dir.path;
     },
+    biometric: PlatformBiometric(),
+    screen: PlatformScreenSecurity(),
+    coverOnBlur: Platform.isLinux,
+    captureLimit: Platform.isLinux ? linuxCaptureLimit : null,
   );
   UmbraCallsBridge? bridge;
   StreamSubscription<calls.MissedCall>? missed;

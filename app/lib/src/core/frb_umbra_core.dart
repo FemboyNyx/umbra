@@ -50,6 +50,18 @@ class FrbUmbraCore implements UmbraCore {
   Future<void> stopNetwork() => _guard(rust_api.stopNetwork);
 
   @override
+  Future<void> lock() {
+    // message-protection.md: lock() also closes SQLCipher and zeroizes
+    // db_key and the pickle keys, and a passphrase wraps db_key with
+    // Argon2id. None of that is in the FFI. Stopping the network is what
+    // the app can do, so nothing new arrives. The database stays open.
+    return stopNetwork();
+  }
+
+  @override
+  Future<void> unlock() => startNetwork();
+
+  @override
   void listen(void Function(app.CoreEvent event) onEvent) {
     _events?.cancel();
     _events = rust_api.events().listen((event) {

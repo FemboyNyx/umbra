@@ -300,6 +300,12 @@ class _OrderCore implements UmbraCore {
   @override
   Future<void> stopNetwork() => inner.stopNetwork();
 
+  @override
+  Future<void> lock() => inner.lock();
+
+  @override
+  Future<void> unlock() => inner.unlock();
+
   void emitForTest(CoreEvent event) => inner.emitForTest(event);
 }
 

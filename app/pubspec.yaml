@@ -14,6 +14,7 @@ dependencies:
   flutter_rust_bridge: 2.13.0
   path_provider: ^2.1.5
   shared_preferences: ^2.5.3
+  crypto: ^3.0.6
   # Required by flutter_rust_bridge codegen for CoreEvent.
   freezed_annotation: ^3.1.0
   # Cargokit glue. Builds ../core when cargo is on PATH; otherwise a stub.
@@ -28,6 +29,7 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  fake_async: ^1.3.3
   flutter_lints: ^6.0.0
   # Windows MSIX packaging. CI looks for a `msix:` dependency line.
   msix: ^3.16.12

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:umbra_calls/umbra_calls.dart' show torRelayRequiredMessage;
 
+import '../lock/lock_copy.dart';
 import '../state/umbra_controller.dart';
 import '../theme/umbra_theme.dart';
 
@@ -34,7 +35,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: widget.controller,
+      listenable: Listenable.merge([
+        widget.controller,
+        widget.controller.appLock,
+      ]),
       builder: (context, _) => _build(context),
     );
   }
@@ -47,6 +51,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
+        key: const Key('settings-list'),
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
         children: [
           TextField(
@@ -104,6 +109,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: () => controller.updateSettings(torSocks: _tor.text),
               child: const Text('Save Tor address'),
             ),
+          ),
+          const SizedBox(height: 8),
+          Text('Lock', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 4),
+          SwitchListTile(
+            key: const Key('soft-lock'),
+            contentPadding: EdgeInsets.zero,
+            title: const Text(softLockTitle),
+            subtitle: const Text(softLockBody),
+            value: controller.appLock.settings.softLock,
+            onChanged: (value) => _setSoftLock(value),
+          ),
+          SwitchListTile(
+            key: const Key('hard-lock'),
+            contentPadding: EdgeInsets.zero,
+            title: const Text(hardLockTitle),
+            subtitle: const Text(hardLockBody),
+            value: controller.appLock.settings.hardLock,
+            onChanged: (value) => _setHardLock(value),
+          ),
+          if (controller.appLock.settings.softLock ||
+              controller.appLock.settings.hardLock)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () => controller.appLock.lockNow(),
+                child: const Text('Lock now'),
+              ),
+            ),
+          if (controller.appLock.lastError != null)
+            Text(
+              controller.appLock.lastError!,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: UmbraColors.danger,
+              ),
+            ),
+          const SizedBox(height: 8),
+          Text(screenSecurityTitle, style: theme.textTheme.titleMedium),
+          const SizedBox(height: 4),
+          SwitchListTile(
+            key: const Key('screen-security'),
+            contentPadding: EdgeInsets.zero,
+            title: const Text(screenSecurityTitle),
+            subtitle: Text(
+              [
+                screenSecurityBody,
+                if (controller.appLock.captureLimitText != null)
+                  controller.appLock.captureLimitText!,
+              ].join(' '),
+            ),
+            value: controller.appLock.settings.screenSecurity,
+            onChanged: (value) => controller.appLock.setScreenSecurity(value),
           ),
           const SizedBox(height: 8),
           Text('Appearance', style: theme.textTheme.titleMedium),
@@ -173,6 +230,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Future<void> _setSoftLock(bool enabled) async {
+    final lock = widget.controller.appLock;
+    if (enabled && !lock.hasPassphrase) {
+      final chosen = await _askNewPassphrase();
+      if (chosen == null || !mounted) return;
+      await lock.setPassphrase(chosen);
+    }
+    if (!enabled && lock.hasPassphrase) {
+      final ok = await _confirmPassphrase();
+      if (ok != true || !mounted) return;
+    }
+    await lock.setSoftLock(enabled);
+  }
+
+  Future<void> _setHardLock(bool enabled) async {
+    final lock = widget.controller.appLock;
+    if (enabled && !lock.hasPassphrase) {
+      final chosen = await _askNewPassphrase();
+      if (chosen == null || !mounted) return;
+      await lock.setPassphrase(chosen);
+    }
+    if (!enabled && lock.hasPassphrase) {
+      final ok = await _confirmPassphrase();
+      if (ok != true || !mounted) return;
+    }
+    await lock.setHardLock(enabled);
+  }
+
+  Future<String?> _askNewPassphrase() {
+    return showDialog<String>(
+      context: context,
+      builder: (context) => const _NewPassphraseDialog(),
+    );
+  }
+
+  Future<bool?> _confirmPassphrase() {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => _ConfirmPassphraseDialog(
+        matches: widget.controller.appLock.passphraseMatches,
+      ),
+    );
+  }
+
   Future<void> _saveName(String value) async {
     try {
       await widget.controller.setDisplayName(value);
@@ -186,6 +287,120 @@ class _SettingsScreenState extends State<SettingsScreen> {
         context,
       ).showSnackBar(SnackBar(content: Text(err.toString())));
     }
+  }
+}
+
+class _NewPassphraseDialog extends StatefulWidget {
+  const _NewPassphraseDialog();
+
+  @override
+  State<_NewPassphraseDialog> createState() => _NewPassphraseDialogState();
+}
+
+class _NewPassphraseDialogState extends State<_NewPassphraseDialog> {
+  final _first = TextEditingController();
+  final _second = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _first.clear();
+    _second.clear();
+    _first.dispose();
+    _second.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('PIN or passphrase'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _first,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'PIN or passphrase'),
+          ),
+          TextField(
+            controller: _second,
+            obscureText: true,
+            decoration: InputDecoration(labelText: 'Again', errorText: _error),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            if (_first.text != _second.text) {
+              setState(() => _error = 'those did not match');
+              return;
+            }
+            if (_first.text.length < 4 || _first.text.length > 128) {
+              setState(() => _error = 'use 4–128 characters');
+              return;
+            }
+            Navigator.pop(context, _first.text);
+          },
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ConfirmPassphraseDialog extends StatefulWidget {
+  const _ConfirmPassphraseDialog({required this.matches});
+
+  final bool Function(String passphrase) matches;
+
+  @override
+  State<_ConfirmPassphraseDialog> createState() =>
+      _ConfirmPassphraseDialogState();
+}
+
+class _ConfirmPassphraseDialogState extends State<_ConfirmPassphraseDialog> {
+  final _field = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _field.clear();
+    _field.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Confirm passphrase'),
+      content: TextField(
+        controller: _field,
+        obscureText: true,
+        decoration: InputDecoration(errorText: _error),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            if (!widget.matches(_field.text)) {
+              setState(() => _error = 'Wrong passphrase.');
+              return;
+            }
+            Navigator.pop(context, true);
+          },
+          child: const Text('Confirm'),
+        ),
+      ],
+    );
   }
 }
 
