@@ -165,6 +165,28 @@ pub fn set_verified(peer_id: String, verified: bool) -> Result<()> {
     }
 }
 
+/// Trust a contact's new identity key after `CoreEvent::KeyChanged`.
+/// Drops old Olm sessions, sets `verified = false` and clears the flag.
+/// Only call this after the user re-compared safety numbers.
+pub fn accept_key_change(peer_id: String) -> Result<Contact> {
+    match backend()? {
+        Backend::Mock(m) => m.accept_key_change(&peer_id),
+        Backend::Real(c) => {
+            let _rt = RUNTIME.enter();
+            c.accept_key_change(&peer_id)
+        }
+    }
+}
+
+/// Keep refusing a contact's new identity key. The old key stays trusted;
+/// the refused key is remembered and won't alert again (a different one will).
+pub fn reject_key_change(peer_id: String) -> Result<()> {
+    match backend()? {
+        Backend::Mock(m) => m.reject_key_change(&peer_id),
+        Backend::Real(c) => c.reject_key_change(&peer_id),
+    }
+}
+
 /// Remove the contact, its Olm sessions, messages and pending outbox.
 pub fn remove_contact(peer_id: String) -> Result<()> {
     match backend()? {

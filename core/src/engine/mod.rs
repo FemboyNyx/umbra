@@ -1,6 +1,7 @@
 pub mod core;
 pub mod crypto;
 pub mod events;
+pub mod limits;
 pub mod net;
 pub mod proto;
 pub mod qr;

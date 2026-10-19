@@ -1,5 +1,9 @@
 //! Two in-process nodes on localhost: add each other, establish Olm,
 //! exchange messages both ways, pass a call signal, and queue while offline.
+//!
+//! With `--features tor` the swarm is always Tor-only (embedded arti), so the
+//! clearnet tests are compiled out; the SOCKS Tor-mode test runs in both.
+#![cfg_attr(feature = "tor", allow(dead_code))]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +70,7 @@ fn init_tracing() {
         .try_init();
 }
 
+#[cfg(not(feature = "tor"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_nodes_chat_and_signal() {
     init_tracing();
@@ -206,6 +211,7 @@ async fn two_nodes_chat_and_signal() {
     b.core.stop_network().await.unwrap();
 }
 
+#[cfg(not(feature = "tor"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outbox_survives_offline_peer() {
     init_tracing();
@@ -270,8 +276,12 @@ async fn tor_mode_is_socks_only() {
     let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
 
-    let b = node(6, "B").await;
-    let qb = b.core.self_info();
+    // B only needs a card with a dialable address; its network stays off so
+    // the test never touches the real Tor network in `--features tor` builds.
+    let bdir = tempfile::tempdir().unwrap();
+    let b = Core::open(bdir.path(), &[6; 32], cfg(), EventHub::new()).unwrap();
+    let mut card_b = b.self_card();
+    card_b.addrs = vec!["/ip4/127.0.0.1/tcp/9".into()];
 
     let dir = tempfile::tempdir().unwrap();
     let hub = EventHub::new();
@@ -290,12 +300,7 @@ async fn tor_mode_is_socks_only() {
     );
     assert!(a.self_info().addrs.is_empty());
 
-    a.add_contact(
-        umbra_core::engine::qr::parse_qr(&qb.qr_payload).unwrap(),
-        false,
-    )
-    .await
-    .unwrap();
+    a.add_contact(card_b, false).await.unwrap();
     let (mut s, _) = timeout(T, proxy.accept())
         .await
         .expect("dial must go through the SOCKS proxy")

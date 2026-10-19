@@ -78,6 +78,22 @@ pub struct Contact {
     pub added_at_ms: i64,
     /// Currently connected (best effort).
     pub online: bool,
+    /// This contact presented a different identity key that is NOT trusted
+    /// yet (see `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change`).
+    pub key_changed: bool,
+    /// The untrusted new identity key, if `key_changed`.
+    pub pending_identity_key: Option<String>,
+}
+
+/// Where a changed identity key was seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KeyChangeSource {
+    /// The peer's `Hello` on a new connection.
+    Hello,
+    /// The peer's answer to a one-time-key claim.
+    KeyClaim,
+    /// A scanned QR / contact card passed to `add_contact`.
+    ContactCard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -164,5 +180,18 @@ pub enum CoreEvent {
     },
     NetworkStatus {
         info: NetworkInfo,
+    },
+    /// A known contact presented a different identity key. The new key is
+    /// rejected and NOT trusted; messages keep using the old key. The contact
+    /// is flagged (`Contact.key_changed`) until the app calls
+    /// `accept_key_change` or `reject_key_change`. Emitted once per distinct
+    /// new key.
+    KeyChanged {
+        peer_id: String,
+        old_identity_key: String,
+        new_identity_key: String,
+        old_safety_number: String,
+        new_safety_number: String,
+        source: KeyChangeSource,
     },
 }

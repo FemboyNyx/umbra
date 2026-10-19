@@ -73,6 +73,8 @@ async fn add_contact(card: ContactCard, verified: bool) -> Result<Contact>;
 fn list_contacts() -> Result<Vec<Contact>>;
 fn set_verified(peer_id: String, verified: bool) -> Result<()>;
 fn remove_contact(peer_id: String) -> Result<()>;
+fn accept_key_change(peer_id: String) -> Result<Contact>;   // ADDITION (security)
+fn reject_key_change(peer_id: String) -> Result<()>;        // ADDITION (security)
 ```
 
 QR payload:
@@ -88,6 +90,36 @@ query). At most 6 addresses are written.
 * `SelfInfo.fingerprint`: our 30-digit half (6 groups of 5).
 * `Contact.safety_number`: 60 digits (12 groups of 5), identical on both
   devices. Show it on the contact screen and let the user mark `verified`.
+
+## Identity key changes
+
+A known contact (same PeerId, i.e. same Ed25519 device key, which Noise
+authenticates) can present a **different Olm identity key**: in its `Hello`,
+in its answer to a one-time-key claim, or in a re-scanned QR passed to
+`add_contact`. Core never trusts it automatically:
+
+1. The new key is **rejected** (`Hello` gets `Rejected(KeyMismatch)`, the
+   key claim is not used, `add_contact` returns an error). Messages keep
+   using the old, trusted key.
+2. The contact is flagged: `Contact.key_changed = true`,
+   `Contact.pending_identity_key = Some(new)`.
+3. `CoreEvent::KeyChanged { peer_id, old_identity_key, new_identity_key,
+   old_safety_number, new_safety_number, source }` is emitted **once per
+   distinct new key** (`source`: `Hello | KeyClaim | ContactCard`).
+
+The app should show a blocking warning and ask the user to compare the
+`new_safety_number` in person, then call one of:
+
+* `accept_key_change(peer_id)`: the pending key becomes the identity key,
+  old Olm sessions are dropped, `verified` is set to **false**, the flag is
+  cleared, and queued messages are re-sent under the new key.
+* `reject_key_change(peer_id)`: keep the old key. The refused key is
+  remembered and is rejected silently from then on; a *different* new key
+  alerts again.
+
+Both return an error if nothing is pending. The DB schema moved to v2
+(columns `pending_identity_key`, `rejected_identity_key`, `key_changed_at`);
+v1 databases are migrated on `init`.
 
 ## Messaging
 
@@ -130,7 +162,9 @@ struct CoreConfig {
 struct SelfInfo { peer_id, fingerprint, qr_payload, display_name, identity_key, ed25519_key, addrs: Vec<String> }
 struct ContactCard { peer_id, identity_key, ed25519_key, addrs: Vec<String>, display_name: Option<String> }
 struct Contact { peer_id, display_name, identity_key, ed25519_key, addrs, verified: bool,
-                 safety_number, added_at_ms: i64, online: bool }
+                 safety_number, added_at_ms: i64, online: bool,
+                 key_changed: bool, pending_identity_key: Option<String> }
+enum KeyChangeSource { Hello, KeyClaim, ContactCard }
 struct Message { id, peer_id, outgoing: bool, body, timestamp_ms: i64, status: DeliveryStatus, read: bool }
 struct ConversationSummary { peer_id, display_name, last_message: Option<Message>, unread_count: u32, updated_at_ms: i64 }
 struct NetworkInfo { running: bool, listen_addrs: Vec<String>, connected_peers: u32, relay_reservations: u32 }
@@ -144,6 +178,8 @@ enum CoreEvent {
     ContactRequest { card: ContactCard },
     Signal { peer_id: String, call_id: String, kind: SignalKind, payload: String },
     NetworkStatus { info: NetworkInfo },
+    KeyChanged { peer_id: String, old_identity_key: String, new_identity_key: String,
+                 old_safety_number: String, new_safety_number: String, source: KeyChangeSource },
 }
 ```
 
@@ -161,7 +197,8 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
    incoming messages; `MessageStatus` events also carry `peer_id`.
 3. Additions: `CoreConfig.listen_addrs`, `CoreConfig.mock`, `network_status()`,
    `SelfInfo.{identity_key, ed25519_key, addrs}`, optional `name=` in the QR,
-   `Contact.{safety_number, added_at_ms, online}`.
+   `Contact.{safety_number, added_at_ms, online, key_changed, pending_identity_key}`,
+   `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change`.
 
 ## Protocol summary
 
@@ -172,17 +209,19 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
   SHA-512 over `ed25519 || curve25519` + PeerId), 30 digits per side,
   sorted and concatenated.
 * **`/umbra/keys/1`** (CBOR): `ClaimOneTimeKey` → `Key { identity_key,
-  one_time_key }`. Served **only to contacts**; falls back to the fallback key.
+  one_time_key }`. Served **only to contacts**, rate-limited, falling back to
+  the fallback key when one-time keys are rationed (see *Abuse limits*).
   The claimer checks `identity_key` equals the one from the QR.
 * **`/umbra/msg/1`** (CBOR): `Hello { card }` (once per connection) or
   `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
-  `Rejected(NotAContact | DecryptFailed | Malformed | Internal)`.
+  `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch |
+  RateLimited)`.
   Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal}`; `to` must be
   the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per
   peer, pre-key messages matched by session id.
 * **Contact flow**: Alice scans Bob → Alice's Hello reaches Bob → Bob gets
-  `ContactRequest` (repeated on each new connection until accepted; dedupe by
-  `peer_id`). Messages Alice sends meanwhile wait in her outbox and flush
+  `ContactRequest` (at most once per identity per 10 min until accepted,
+  subject to the limits below; still dedupe by `peer_id` in the UI). Messages Alice sends meanwhile wait in her outbox and flush
   when Bob calls `add_contact`.
 * **Outbox**: retried on connect, on Hello, on mDNS/DHT discovery and every
   15 s; duplicates are dropped by message id; `DecryptFailed` resets the
@@ -191,11 +230,45 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
   (`/umbra/kad/1.0.0`, own DHT — needs `bootstrap_addrs`), relay v2
   circuits + DCUtR hole punching (`relay_addrs`).
 
+## Abuse limits
+
+Inbound traffic from strangers and key claims are throttled in
+`core/src/engine/limits.rs`. Each value is a `pub const` with the default
+below; `Core::open_with_limits(.., Limits { .. })` overrides them (used by
+tests; the bridge uses the defaults).
+
+| Constant | Default | Effect |
+|---|---|---|
+| `HELLO_BURST` / `HELLO_REFILL` | 5 / 1 per 10 s | Per-peer token bucket on `Hello` (contacts too). Excess gets `Rejected(RateLimited)`. |
+| `CONTACT_REQUEST_WINDOW` | 10 min | At most one `ContactRequest` event per unknown identity per window. |
+| `CONTACT_REQUEST_BURST` / `_REFILL` | 10 / 1 per 10 s | Global budget of `ContactRequest` events (sybil floods). |
+| `MAX_PENDING_CONTACT_REQUESTS` | 64 | Distinct unanswered requesters tracked; beyond that new requests are dropped (logged). `add_contact` frees a slot. |
+| `PENDING_CONTACT_REQUEST_TTL` | 24 h | A pending request is forgotten after this. |
+| `OTK_CLAIM_BURST` / `_REFILL` | 3 / 1 per 60 s | Per-contact `ClaimOneTimeKey` bucket; excess gets `Refused(RateLimited)` (the claimer retries later). |
+| `MAX_OUTSTANDING_OTKS_PER_PEER` | 2 | Fresh one-time keys a contact may hold unconsumed. Beyond that it gets the **fallback key**, so its session still works but it can't drain the pool. |
+| `MAX_OUTSTANDING_OTKS_TOTAL` | 50 | Same, across all contacts. |
+| `OUTSTANDING_OTK_TTL` | 1 h | An unconsumed key stops counting after this. |
+| `OTK_POOL_LOW_WATER` / `OTK_POOL_BATCH` | 5 / 20 | The published pool is topped up by 20 keys when fewer than 5 remain. |
+| `MAX_TRACKED_PEERS` | 1024 | Bound on per-peer bucket state (idle buckets, then least recently used, are evicted). |
+
+Notes:
+
+* A key claim never blocks: a contact gets a fresh key, the fallback key, or
+  `RateLimited`. One contact's flood doesn't affect other contacts' claims
+  or sessions.
+* A one-time key stops counting as outstanding once a pre-key message using
+  it is decrypted.
+* The fallback key is generated once and not rotated; its public half is kept
+  in the store (`olm_fallback_key`) because vodozemac only reports it while
+  unpublished.
+* Limiter state lives in memory and resets on restart. The OTK pool is
+  persisted.
+
 ## Tor mode
 
 Tor-only when `CoreConfig.tor_socks = "ip:port"` (system tor / Orbot /
 `arti proxy`), or when built with cargo feature `tor` (embedded arti via
-`umbra-tor`; see `docs/tor.md` on the backup branch):
+`umbra-tor`; see `docs/tor.md`):
 
 * base transport is the Tor dialer **only** (never `or()`-ed with TCP/QUIC);
   no local DNS, no listening, no mDNS, no DCUtR, Kademlia client mode,
@@ -204,8 +277,30 @@ Tor-only when `CoreConfig.tor_socks = "ip:port"` (system tor / Orbot /
   `/p2p-circuit` addresses);
 * calls (`calls/`, WebRTC) are not routed through Tor — the UI must say so.
 
-To enable `tor` once `core/tor/` is on main: uncomment the `"tor"` workspace
-member, the `umbra-tor` dependency and the `tor` feature in `core/Cargo.toml`.
+Features: `tor` (embedded arti, Tor-only) and `tor-listen` (**EXPERIMENTAL**,
+implies `tor`: compiles umbra-tor's onion-service hosting and sets the onion
+nickname `"umbra"`; core does **not** call `listen_on` yet). Keep both out of
+release builds until the arti APK delta is measured.
+
+Embedded arti state (`tor` feature):
+
+* Built with `TorTransport::bootstrapped_with(TorConfig::new().state_dir(..)
+  .cache_dir(..)[.onion_nickname("umbra")])`, never arti's platform defaults
+  (those don't exist on Android).
+* Dirs: `<data_dir>/tor/state` and `<data_dir>/tor/cache`, created by
+  `start_network` and chmod'ed to **0700** on Unix (arti's fs-mistrust
+  refuses group/world-accessible dirs; Android app-private dirs already are).
+* `<data_dir>/tor/state` holds guard state and, with `tor-listen`, the onion
+  service identity keystore (`state/keystore/`). **Wiping it permanently
+  changes the `.onion` address**, so back it up and restore it together with
+  `umbra.db` (the Olm/identity store). The nickname is the keystore namespace;
+  changing it also changes the address.
+* arti 0.35 quirk: an onion service dropped **before bootstrap completed**
+  keeps its state lock until the process exits, and relaunching the same
+  nickname in that process fails with `AlreadyLocked`. Core doesn't host
+  onion services yet; once it does, don't stop and restart networking
+  (`stop_network` / `start_network`) before Tor has bootstrapped. Restart
+  the process instead.
 
 ## Mock backend (`mock: true`)
 

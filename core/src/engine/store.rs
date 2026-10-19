@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::api::types::{Contact, ConversationSummary, DeliveryStatus, Message};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -116,6 +116,10 @@ pub struct ContactRow {
     pub addrs: Vec<String>,
     pub verified: bool,
     pub added_at: i64,
+    /// Different identity key presented by this contact, awaiting a user decision.
+    pub pending_identity_key: Option<String>,
+    /// Identity key the user refused; presenting it again is ignored silently.
+    pub rejected_identity_key: Option<String>,
 }
 
 impl ContactRow {
@@ -130,6 +134,8 @@ impl ContactRow {
             safety_number,
             added_at_ms: self.added_at,
             online,
+            key_changed: self.pending_identity_key.is_some(),
+            pending_identity_key: self.pending_identity_key,
         }
     }
 }
@@ -144,11 +150,13 @@ fn row_to_contact(r: &rusqlite::Row<'_>) -> rusqlite::Result<ContactRow> {
         addrs: serde_json::from_str(&addrs).unwrap_or_default(),
         verified: r.get::<_, i64>(5)? != 0,
         added_at: r.get(6)?,
+        pending_identity_key: r.get(7)?,
+        rejected_identity_key: r.get(8)?,
     })
 }
 
 const CONTACT_COLS: &str =
-    "peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at";
+    "peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at, pending_identity_key, rejected_identity_key";
 
 impl Store {
     /// Open or create `path`, keyed with the raw 32-byte `key`.
@@ -186,11 +194,19 @@ impl Store {
         let store = Self {
             conn: Mutex::new(conn),
         };
-        match store.meta_get_i64("schema_version")? {
-            None => store.meta_set("schema_version", &SCHEMA_VERSION.to_string().into_bytes())?,
-            Some(v) if v > SCHEMA_VERSION => bail!("database schema {v} is newer than this build"),
-            Some(_) => {}
+        let v = store.meta_get_i64("schema_version")?.unwrap_or(1);
+        if v > SCHEMA_VERSION {
+            bail!("database schema {v} is newer than this build");
         }
+        if v < 2 {
+            // v2: key-change tracking.
+            store.c().execute_batch(
+                "ALTER TABLE contacts ADD COLUMN pending_identity_key TEXT;
+                 ALTER TABLE contacts ADD COLUMN rejected_identity_key TEXT;
+                 ALTER TABLE contacts ADD COLUMN key_changed_at INTEGER;",
+            )?;
+        }
+        store.meta_set("schema_version", SCHEMA_VERSION.to_string().as_bytes())?;
         Ok(store)
     }
 
@@ -294,6 +310,44 @@ impl Store {
                 "UPDATE contacts SET addrs = ?2 WHERE peer_id = ?1",
                 params![peer_id, serde_json::to_string(addrs)?],
             )?;
+        }
+        Ok(())
+    }
+
+    /// Flag a key change (keeps the trusted key in place).
+    pub fn set_pending_key(&self, peer_id: &str, key: &str, now: i64) -> Result<()> {
+        self.c().execute(
+            "UPDATE contacts SET pending_identity_key = ?2, key_changed_at = ?3 WHERE peer_id = ?1",
+            params![peer_id, key, now],
+        )?;
+        Ok(())
+    }
+
+    /// Trust the pending key: it replaces the identity key and the contact
+    /// becomes unverified.
+    pub fn accept_pending_key(&self, peer_id: &str) -> Result<()> {
+        let n = self.c().execute(
+            "UPDATE contacts SET identity_key = pending_identity_key, pending_identity_key = NULL,
+               rejected_identity_key = NULL, key_changed_at = NULL, verified = 0
+             WHERE peer_id = ?1 AND pending_identity_key IS NOT NULL",
+            [peer_id],
+        )?;
+        if n == 0 {
+            bail!("no pending key change for {peer_id}");
+        }
+        Ok(())
+    }
+
+    /// Refuse the pending key and remember it so it doesn't re-alert.
+    pub fn reject_pending_key(&self, peer_id: &str) -> Result<()> {
+        let n = self.c().execute(
+            "UPDATE contacts SET rejected_identity_key = pending_identity_key,
+               pending_identity_key = NULL, key_changed_at = NULL
+             WHERE peer_id = ?1 AND pending_identity_key IS NOT NULL",
+            [peer_id],
+        )?;
+        if n == 0 {
+            bail!("no pending key change for {peer_id}");
         }
         Ok(())
     }
@@ -556,6 +610,8 @@ mod tests {
             addrs: vec!["/ip4/127.0.0.1/tcp/1".into()],
             verified: false,
             added_at: 1,
+            pending_identity_key: None,
+            rejected_identity_key: None,
         }
     }
 
@@ -581,6 +637,54 @@ mod tests {
         );
         assert!(!raw.windows(13).any(|w| w == b"secret-plaint"));
         assert!(Store::open(&path, &[1u8; 16]).is_err());
+    }
+
+    #[test]
+    fn migrates_v1_and_tracks_key_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.db");
+        {
+            // Simulate a v1 database.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex::encode(KEY)))
+                .unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('schema_version', X'31')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO contacts(peer_id, identity_key, ed25519_key, verified, added_at) VALUES ('p', 'ik1', 'ed', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path, &KEY).unwrap();
+        assert_eq!(
+            s.meta_get_i64("schema_version").unwrap(),
+            Some(SCHEMA_VERSION)
+        );
+        let c = s.get_contact("p").unwrap().unwrap();
+        assert!(c.verified && c.pending_identity_key.is_none());
+        assert!(s.accept_pending_key("p").is_err());
+        s.set_pending_key("p", "ik2", 5).unwrap();
+        s.reject_pending_key("p").unwrap();
+        let c = s.get_contact("p").unwrap().unwrap();
+        assert_eq!(
+            (c.identity_key.as_str(), c.rejected_identity_key.as_deref()),
+            ("ik1", Some("ik2"))
+        );
+        s.set_pending_key("p", "ik3", 6).unwrap();
+        s.accept_pending_key("p").unwrap();
+        let c = s.get_contact("p").unwrap().unwrap();
+        assert_eq!(c.identity_key, "ik3");
+        assert!(
+            !c.verified && c.pending_identity_key.is_none() && c.rejected_identity_key.is_none()
+        );
+        drop(s);
+        // Re-open is idempotent.
+        Store::open(&path, &KEY).unwrap();
     }
 
     #[test]

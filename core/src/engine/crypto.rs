@@ -26,6 +26,8 @@ use crate::engine::util::{b64, now_ms};
 
 const META_DEVICE_KEY: &str = "device_key";
 const META_OLM_ACCOUNT: &str = "olm_account";
+const META_OTK_POOL: &str = "otk_pool";
+const META_FALLBACK_KEY: &str = "olm_fallback_key";
 /// Sessions kept per peer.
 const MAX_SESSIONS_PER_PEER: usize = 4;
 
@@ -158,23 +160,75 @@ impl Crypto {
             .collect()
     }
 
-    /// Hand out a fresh one-time key (falls back to the fallback key).
+    /// Hand out a fresh one-time key with default pool sizes.
     pub fn claim_one_time_key(&self) -> Result<Curve25519PublicKey> {
+        self.take_one_time_key(
+            crate::engine::limits::OTK_POOL_LOW_WATER,
+            crate::engine::limits::OTK_POOL_BATCH,
+        )
+    }
+
+    /// Pop a fresh one-time key from the published pool, replenishing it
+    /// (`batch` new keys) when fewer than `low_water` remain.
+    pub fn take_one_time_key(&self, low_water: usize, batch: usize) -> Result<Curve25519PublicKey> {
         let mut acc = self.account.lock().expect("account poisoned");
-        acc.generate_one_time_keys(1);
-        let key = acc.one_time_keys().into_values().next();
-        let key = match key {
+        let mut pool = self.load_pool()?;
+        if pool.len() < low_water.max(1) {
+            drop(acc);
+            self.fallback_key()?; // record it before it is marked published
+            acc = self.account.lock().expect("account poisoned");
+            acc.generate_one_time_keys(batch.max(1));
+            pool.extend(acc.one_time_keys().into_values().map(|k| k.to_base64()));
+            acc.mark_keys_as_published();
+            self.save_account(&acc)?;
+        }
+        let key = pool.remove(0);
+        self.save_pool(&pool)?;
+        Curve25519PublicKey::from_base64(&key).map_err(|e| anyhow!("pool key: {e}"))
+    }
+
+    /// The fallback key (reusable; used when one-time keys are rationed).
+    ///
+    /// vodozemac only reports the fallback key while it is unpublished, so its
+    /// public half is remembered in meta; it is never rotated here.
+    pub fn fallback_key(&self) -> Result<Curve25519PublicKey> {
+        let mut acc = self.account.lock().expect("account poisoned");
+        if let Some(v) = self.store.meta_get(META_FALLBACK_KEY)? {
+            let s = String::from_utf8(v).context("corrupt fallback key")?;
+            return Curve25519PublicKey::from_base64(&s).map_err(|e| anyhow!("fallback key: {e}"));
+        }
+        let k = match acc.fallback_key().into_values().next() {
             Some(k) => k,
-            None => match acc.fallback_key().into_values().next() {
-                Some(k) => k,
-                None => acc
-                    .generate_fallback_key()
-                    .ok_or_else(|| anyhow!("no fallback key"))?,
-            },
+            None => {
+                acc.generate_fallback_key();
+                acc.fallback_key()
+                    .into_values()
+                    .next()
+                    .ok_or_else(|| anyhow!("no fallback key"))?
+            }
         };
+        self.store
+            .meta_set(META_FALLBACK_KEY, k.to_base64().as_bytes())?;
         acc.mark_keys_as_published();
         self.save_account(&acc)?;
-        Ok(key)
+        Ok(k)
+    }
+
+    /// Published, never-issued one-time keys (public halves, base64).
+    pub fn pool_size(&self) -> Result<usize> {
+        Ok(self.load_pool()?.len())
+    }
+
+    fn load_pool(&self) -> Result<Vec<String>> {
+        Ok(match self.store.meta_get(META_OTK_POOL)? {
+            Some(v) => serde_json::from_slice(&v).context("corrupt otk pool")?,
+            None => Vec::new(),
+        })
+    }
+
+    fn save_pool(&self, pool: &[String]) -> Result<()> {
+        self.store
+            .meta_set(META_OTK_POOL, &serde_json::to_vec(pool)?)
     }
 
     pub fn has_session(&self, peer: &str) -> Result<bool> {
@@ -215,6 +269,18 @@ impl Crypto {
         msg_type: u8,
         body: &[u8],
     ) -> Result<Vec<u8>> {
+        Ok(self.decrypt_ex(peer, their_ik, msg_type, body)?.0)
+    }
+
+    /// Like [`Self::decrypt`], also returning the one-time key consumed by a
+    /// new inbound session (if any).
+    pub fn decrypt_ex(
+        &self,
+        peer: &str,
+        their_ik: Curve25519PublicKey,
+        msg_type: u8,
+        body: &[u8],
+    ) -> Result<(Vec<u8>, Option<Curve25519PublicKey>)> {
         let msg = OlmMessage::from_parts(msg_type as usize, body)
             .map_err(|e| anyhow!("malformed olm message: {e}"))?;
         let mut acc = self.account.lock().expect("account poisoned");
@@ -230,20 +296,20 @@ impl Crypto {
                 {
                     let pt = s.decrypt(&msg)?;
                     self.save_session(peer, s)?;
-                    return Ok(pt);
+                    return Ok((pt, None));
                 }
                 let res = acc.create_inbound_session(session_config(), their_ik, pre)?;
                 // Persist the account first: the one-time key is now consumed.
                 self.save_account(&acc)?;
                 self.save_session(peer, &res.session)?;
                 self.store.prune_sessions(peer, MAX_SESSIONS_PER_PEER)?;
-                Ok(res.plaintext)
+                Ok((res.plaintext, Some(pre.one_time_key())))
             }
             OlmMessage::Normal(_) => {
                 for s in sessions.iter_mut() {
                     if let Ok(pt) = s.decrypt(&msg) {
                         self.save_session(peer, s)?;
-                        return Ok(pt);
+                        return Ok((pt, None));
                     }
                 }
                 bail!("no session could decrypt the message")
