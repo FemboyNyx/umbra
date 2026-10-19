@@ -113,7 +113,8 @@ CREATE TABLE IF NOT EXISTS servers (
     anchor_key TEXT NOT NULL,       -- owner key we first trusted (genesis or invite)
     frozen_seq INTEGER,             -- set when a fork was seen: read-only
     removed    TEXT,                -- 'kicked' | 'banned' | 'left'
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    display_name TEXT               -- our name in this server; NULL = the global one
 );
 CREATE TABLE IF NOT EXISTS manifests (
     server_id   TEXT NOT NULL,

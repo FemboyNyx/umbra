@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 pub const HELLO_BURST: u32 = 5;
 /// ... then one more per this interval.
 pub const HELLO_REFILL: Duration = Duration::from_secs(10);
+/// `JoinHello` per peer: its own bucket, so joins can't starve Hellos.
+pub const JOIN_HELLO_BURST: u32 = 3;
+pub const JOIN_HELLO_REFILL: Duration = Duration::from_secs(20);
 /// At most one `ContactRequest` event per unknown identity per window.
 pub const CONTACT_REQUEST_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// Global `ContactRequest` event budget (burst) ...
@@ -43,6 +46,8 @@ pub const MAX_TRACKED_PEERS: usize = 1024;
 pub struct Limits {
     pub hello_burst: u32,
     pub hello_refill: Duration,
+    pub join_hello_burst: u32,
+    pub join_hello_refill: Duration,
     pub contact_request_window: Duration,
     pub contact_request_burst: u32,
     pub contact_request_refill: Duration,
@@ -63,6 +68,8 @@ impl Default for Limits {
         Self {
             hello_burst: HELLO_BURST,
             hello_refill: HELLO_REFILL,
+            join_hello_burst: JOIN_HELLO_BURST,
+            join_hello_refill: JOIN_HELLO_REFILL,
             contact_request_window: CONTACT_REQUEST_WINDOW,
             contact_request_burst: CONTACT_REQUEST_BURST,
             contact_request_refill: CONTACT_REQUEST_REFILL,

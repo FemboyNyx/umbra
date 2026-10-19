@@ -107,6 +107,17 @@ pub enum ServerPayloadKind {
 /// Max bytes of `data` in one server payload.
 pub const MAX_SERVER_PAYLOAD_BYTES: usize = 64 * 1024;
 
+/// Max bytes of `data` for one payload kind. Manifests carry up to 250
+/// roster cards, so they get [`crate::engine::server_model::MAX_MANIFEST_BYTES`]
+/// plus framing (still well under the 1 MiB codec cap after base64 and
+/// padding).
+pub fn max_server_payload(kind: ServerPayloadKind) -> usize {
+    match kind {
+        ServerPayloadKind::ServerManifest => crate::engine::server_model::MAX_MANIFEST_BYTES + 1024,
+        _ => MAX_SERVER_PAYLOAD_BYTES,
+    }
+}
+
 /// A server payload received from a co-member, after all checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerInbound {

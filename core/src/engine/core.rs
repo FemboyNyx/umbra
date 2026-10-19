@@ -55,6 +55,9 @@ struct NetState {
     connected_count: usize,
 }
 
+#[path = "server_api.rs"]
+mod server_api;
+
 pub struct Core {
     id: Identity,
     store: Arc<Store>,
@@ -68,6 +71,8 @@ pub struct Core {
     data_dir: std::path::PathBuf,
     /// Serializes epoch bumps (see `engine::epoch`).
     epoch_lock: Mutex<()>,
+    /// Serializes server state changes (manifests, ops, joins).
+    server_lock: Mutex<()>,
     /// Engine-internal consumers of server payloads (Phase 1 server logic,
     /// tests). Never crosses the FFI.
     server_subs: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<ServerInbound>>>,
@@ -121,6 +126,7 @@ impl Pin {
 /// Mutable rate-limiter state (see `engine::limits`).
 struct Limiter {
     hello: KeyedBuckets<PeerId>,
+    join_hello: KeyedBuckets<PeerId>,
     otk_claims: KeyedBuckets<PeerId>,
     contact_requests: TokenBucket,
     /// Unknown identities with an emitted `ContactRequest` -> last emission.
@@ -133,6 +139,11 @@ impl Limiter {
     fn new(l: &Limits) -> Self {
         Self {
             hello: KeyedBuckets::new(l.hello_burst, l.hello_refill, l.max_tracked_peers),
+            join_hello: KeyedBuckets::new(
+                l.join_hello_burst,
+                l.join_hello_refill,
+                l.max_tracked_peers,
+            ),
             otk_claims: KeyedBuckets::new(
                 l.otk_claim_burst,
                 l.otk_claim_refill,
@@ -216,6 +227,7 @@ impl Core {
             limits,
             server_subs: Mutex::new(Vec::new()),
             epoch_lock: Mutex::new(()),
+            server_lock: Mutex::new(()),
         }))
         .and_then(|core: Arc<Self>| {
             core.init_epoch()?;
@@ -1114,6 +1126,12 @@ impl Core {
     pub(crate) fn handle_msg(self: &Arc<Self>, peer: PeerId, req: MsgRequest) -> MsgResponse {
         match req {
             MsgRequest::Hello { card } => self.on_hello(peer, card),
+            MsgRequest::JoinHello {
+                card,
+                server_id,
+                invite_id,
+                proof,
+            } => self.on_join_hello(peer, card, &server_id, &invite_id, &proof),
             MsgRequest::Olm { t, c } => match self.on_olm(peer, t, &c) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1291,8 +1309,20 @@ impl Core {
                 let Ok(data) = unb64(&data) else {
                     return Ok(MsgResponse::Rejected(RejectReason::Malformed));
                 };
-                if data.len() > MAX_SERVER_PAYLOAD_BYTES {
+                if data.len() > max_server_payload(kind) {
                     return Ok(MsgResponse::Rejected(RejectReason::Malformed));
+                }
+                if matches!(
+                    kind,
+                    ServerPayloadKind::ServerManifest | ServerPayloadKind::ServerOp
+                ) {
+                    if let Err(e) = self.on_server_payload(&pid, &server_id, kind, &data) {
+                        tracing::warn!(%peer, %server_id, "server payload ignored: {e:#}");
+                    }
+                    if self.has_outbox(&peer) {
+                        self.spawn_flush(peer);
+                    }
+                    return Ok(MsgResponse::Delivered);
                 }
                 self.emit_server(ServerInbound {
                     peer_id: pid,
@@ -1660,8 +1690,9 @@ impl Core {
         if !pin.server_ok(server_id) {
             bail!("key change pending or unsigned card for {peer_id}; resolve it first");
         }
-        if data.len() > MAX_SERVER_PAYLOAD_BYTES {
-            bail!("server payload too large (max {MAX_SERVER_PAYLOAD_BYTES} bytes)");
+        let max = max_server_payload(kind);
+        if data.len() > max {
+            bail!("server payload too large (max {max} bytes)");
         }
         if !meta_ok(&meta) {
             bail!("invalid envelope fields");
@@ -2099,9 +2130,11 @@ mod tests {
     }
 
     fn server_body(server_id: &str, data: &[u8]) -> PayloadBody {
+        // Manifests and ops are consumed by the server engine; other kinds
+        // reach `subscribe_server`.
         PayloadBody::Server {
             server_id: server_id.into(),
-            kind: ServerPayloadKind::ServerOp,
+            kind: ServerPayloadKind::ServerKey,
             data: b64(data),
         }
     }

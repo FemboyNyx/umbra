@@ -337,7 +337,7 @@ pub async fn spawn(
 }
 
 enum Queued {
-    Msg(MsgRequest, oneshot::Sender<Result<MsgResponse>>),
+    Msg(Box<MsgRequest>, oneshot::Sender<Result<MsgResponse>>),
     Keys(KeysRequest, oneshot::Sender<Result<KeysResponse>>),
 }
 
@@ -421,7 +421,7 @@ impl NetTask {
     fn send_now(&mut self, peer: PeerId, q: Queued) {
         match q {
             Queued::Msg(req, reply) => {
-                let id = self.swarm.behaviour_mut().msg.send_request(&peer, req);
+                let id = self.swarm.behaviour_mut().msg.send_request(&peer, *req);
                 self.pending_msg.insert(id, reply);
             }
             Queued::Keys(req, reply) => {
@@ -455,7 +455,7 @@ impl NetTask {
 
     fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Msg { peer, req, reply } => self.submit(peer, Queued::Msg(req, reply)),
+            Cmd::Msg { peer, req, reply } => self.submit(peer, Queued::Msg(Box::new(req), reply)),
             Cmd::Keys { peer, req, reply } => self.submit(peer, Queued::Keys(req, reply)),
             Cmd::AddAddrs { peer, addrs } => {
                 self.book.entry(peer).or_default().extend(addrs);

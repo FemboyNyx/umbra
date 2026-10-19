@@ -30,6 +30,18 @@ pub enum MsgRequest {
         #[serde(with = "serde_bytes")]
         c: Vec<u8>,
     },
+    /// Ask to join a server with an invite (servers.md "Invites and
+    /// joining"). `proof = HMAC(invite_secret, "umbra-join-v1" || PeerId)`,
+    /// so a stolen proof is useless to anyone else. Sent before any session
+    /// exists; answered `Ok` (admitted or waiting for approval) or
+    /// `Rejected(InviteInvalid | NotAuthorized | Banned | RateLimited)`.
+    JoinHello {
+        card: ContactCard,
+        server_id: String,
+        invite_id: String,
+        #[serde(with = "serde_bytes")]
+        proof: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +63,14 @@ pub enum RejectReason {
     /// sender (a replay, or the sender's state was rolled back). The sender
     /// should jump its sequence numbers and start a fresh session.
     Replayed,
+    /// `JoinHello` with an unknown, expired, revoked or used-up invite, or a
+    /// bad proof.
+    InviteInvalid,
+    /// The recipient may not admit anyone (no invite permission, server
+    /// frozen or full, or we were removed).
+    NotAuthorized,
+    /// The joiner is banned from the server.
+    Banned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

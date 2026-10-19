@@ -17,6 +17,8 @@ pub struct ServerRow {
     pub frozen_seq: Option<i64>,
     pub removed: Option<String>,
     pub created_at: i64,
+    /// Per-server display name for our (default) identity.
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,28 +68,33 @@ fn server_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ServerRow> {
         frozen_seq: r.get(3)?,
         removed: r.get(4)?,
         created_at: r.get(5)?,
+        display_name: r.get(6)?,
     })
 }
 
-const SERVER_COLS: &str = "server_id, owner_key, anchor_key, frozen_seq, removed, created_at";
+const SERVER_COLS: &str =
+    "server_id, owner_key, anchor_key, frozen_seq, removed, created_at, display_name";
 
 impl Store {
     // ---- servers ----
 
     pub fn server_insert(&self, s: &ServerRow) -> Result<()> {
         self.c().execute(
-            "INSERT INTO servers(server_id, owner_key, anchor_key, frozen_seq, removed, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO servers(server_id, owner_key, anchor_key, frozen_seq, removed, created_at,
+                                 display_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(server_id) DO UPDATE SET
                owner_key = COALESCE(excluded.owner_key, servers.owner_key),
-               removed = excluded.removed",
+               removed = excluded.removed,
+               display_name = excluded.display_name",
             params![
                 s.server_id,
                 s.owner_key,
                 s.anchor_key,
                 s.frozen_seq,
                 s.removed,
-                s.created_at
+                s.created_at,
+                s.display_name
             ],
         )?;
         Ok(())
@@ -127,6 +134,14 @@ impl Store {
         self.c().execute(
             "UPDATE servers SET removed = ?2 WHERE server_id = ?1",
             params![server_id, removed],
+        )?;
+        Ok(())
+    }
+
+    pub fn server_set_display_name(&self, server_id: &str, name: Option<&str>) -> Result<()> {
+        self.c().execute(
+            "UPDATE servers SET display_name = ?2 WHERE server_id = ?1",
+            params![server_id, name],
         )?;
         Ok(())
     }
