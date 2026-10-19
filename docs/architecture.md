@@ -1,196 +1,243 @@
 # Umbra architecture
 
-Status: **design draft**. This describes the intended shape of Umbra, based
-on the agreed stack. `core/`, `app/`, and `calls/` are still being built, so
-treat anything here that disagrees with the code as a bug in this doc and fix it.
+Status: matches `core/` as of `119c53b` (Elite's core, PR #8). `app/` and
+`calls/` haven't landed yet, so those sections describe the contract `core/`
+exposes to them, not code that exists. When this doc and the code disagree,
+the code wins. Fix the doc.
 
 Umbra is a peer-to-peer, end-to-end encrypted messenger with voice and video
-calls for Android, Windows, and Linux. There is no Umbra server. Peers find and
-talk to each other directly over libp2p, and every message is end-to-end
-encrypted with vodozemac before it reaches the network.
+calls for Android, Windows, and Linux. There is no Umbra server. Peers talk
+directly over libp2p (or through circuit relays when they can't), and every
+message is Olm-encrypted by vodozemac before it touches the network.
 
-License: AGPL-3.0.
+License: AGPL-3.0-or-later.
 
 ## Components
 
 ```mermaid
 flowchart TB
-  subgraph App["app/ (Flutter, Dart)"]
+  subgraph App["app/ (Flutter, Dart), not landed yet"]
     UI[UI and state]
-    Calls["calls/ (flutter_webrtc)"]
+    KS[OS keystore holds db_key]
+    Calls["calls/ (flutter_webrtc), not landed yet"]
   end
-  subgraph Core["core/ (Rust)"]
-    API[FFI API via flutter_rust_bridge]
-    Crypto[Crypto: vodozemac Olm and Megolm]
-    Store[Encrypted local store]
-    Net[Networking: rust-libp2p swarm]
-    Tor["core/tor (optional, cargo feature tor)"]
+  subgraph Core["core/ (Rust crate umbra_core)"]
+    API["src/api: flutter_rust_bridge 2.13.0"]
+    Eng[engine/core.rs: contacts, outbox, dispatch]
+    Crypto[engine/crypto.rs: vodozemac Olm]
+    Store[engine/store.rs: SQLCipher]
+    Net[engine/net.rs: libp2p swarm]
+    Socks[engine/socks.rs: SOCKS5 Tor transport]
+    Tor["core/tor (umbra-tor): embedded arti, feature tor"]
   end
   UI <--> API
-  Calls <-->|signaling only| API
-  API --> Crypto
-  API --> Store
-  Crypto --> Net
+  KS -->|db_key at init| API
+  Calls <-->|send_signal / Signal events| API
+  API --> Eng
+  Eng --> Crypto
+  Eng --> Store
+  Crypto --> Store
+  Eng --> Net
+  Net -.-> Socks
   Net -.-> Tor
   Calls <-->|DTLS-SRTP media| Peer[(Remote peer)]
-  Net <-->|Noise + yamux| Peer
+  Net <-->|Noise + yamux, or QUIC| Peer
 ```
 
-| Directory | Language | Owner | Responsibility |
-| --- | --- | --- | --- |
-| `core/` | Rust | Elite | Identity, crypto sessions, networking, storage, the FFI surface |
-| `core/tor/` | Rust | Val | Optional Tor transport (`umbra-tor`), see [tor.md](tor.md) |
-| `app/` | Dart/Flutter | Copilot | UI, contacts, chats, settings, platform glue |
-| `calls/` | Dart (flutter_webrtc) | Gem | Voice and video, signaling over the core's encrypted channel |
-| `packaging/` | scripts | Sally | App IDs, icons, AppImage, tarball, zip, MSIX, Android signing |
-| `.github/workflows/` | YAML | Cali | CI and tag-triggered releases |
+| Path | Owner | Responsibility |
+| --- | --- | --- |
+| `core/` | Elite | Identity, Olm sessions, libp2p, SQLCipher store, outbox, FFI API. See [core-api.md](core-api.md) |
+| `core/tor/` | Val | `umbra-tor`, the optional embedded-arti transport. See [tor.md](tor.md) |
+| `app/` | Copilot | UI, contacts, chats, settings, and keeping `db_key` in the OS keystore |
+| `calls/` | Gem | Voice and video over flutter_webrtc, with signaling through `core` |
+| `packaging/` | Sally | App ID `io.github.femboynyx.umbra`, icons, AppImage, tarball, zip, MSIX, Android signing |
+| `.github/workflows/` | Cali | CI and tag-triggered releases. See [ci.md](ci.md) |
 
-### Rule of thumb
-
-Anything that touches keys, plaintext-to-ciphertext, or the network lives in
-Rust. Dart only ever sees decrypted messages to render and opaque handles. That
-keeps the security-relevant code in one memory-safe, testable place, and lets
-`core/` be fuzzed and tested without a Flutter toolchain.
+Rule of thumb: anything that touches private keys, ciphertext, or the network
+lives in Rust. Dart gets decrypted messages to render and plain data types.
 
 ## Identity
 
-Each install has one **device identity**:
+Each install is one device identity, made up of two keys:
 
-- A **libp2p keypair** (Ed25519), which gives the `PeerId` used for routing and
-  for the Noise handshake.
-- A **vodozemac `Account`** with an Ed25519 signing key and a Curve25519
-  identity key, which is used for Olm sessions.
+- An **Ed25519 libp2p `Keypair`**. It derives the `PeerId` and authenticates
+  the Noise handshake. The same key is the `ed` field of the contact card.
+- A **vodozemac Olm `Account`**, whose Curve25519 identity key is the `ik`
+  field.
 
-The two are bound together: the vodozemac Ed25519 key signs the `PeerId`, and
-that signed bundle is what a contact gets when they add you (by QR code or
-invite link). A contact therefore pins *both* keys at add time, and a later
-connection from the right `PeerId` but the wrong vodozemac key (or the reverse)
-is rejected.
+Both are created on first `init` and stored in SQLCipher. The account is also
+pickled with a key derived from `db_key`.
 
-There are no usernames, phone numbers, or emails. The user-facing identity is
-a display name the user picks plus a **safety number** derived from the two
-public keys, which two people can compare in person or over a call.
+A **contact card** is an `umbra://add?peer=…&ik=…&ed=…&addr=…&name=…` link,
+which goes in a QR code or gets shared as a link (`engine/qr.rs`).
+`validate_card` checks that `ed` really derives `peer` and that `ik` is a valid
+Curve25519 key. Two things to note:
 
-Multi-device (one person, several devices) is **out of scope for v1**. Each
-device is its own identity. When it's added, it'll follow the Matrix model of
-cross-signing device keys with a user master key.
+- `ik` is **not signed** by `ed`. It's bound to the PeerId only by the card
+  itself (which you trust as much as the channel it came through) and by the
+  `Hello` exchange, which runs over a Noise connection authenticated as that
+  PeerId. Once a contact is added, both keys are **pinned**.
+- Key changes are refused, not warned about. `add_contact` fails if a stored
+  contact's keys differ. `Hello` messages and one-time-key responses with
+  different keys get rejected. The user has to remove and re-add the contact
+  after verifying.
+
+**Safety numbers** (`engine/safety.rs`) use Signal's numeric fingerprint
+construction (version 0, 5200 SHA-512 rounds over `ed || ik || PeerId`). That
+gives each side 30 digits, sorted and joined into a 60-digit number grouped in
+12 blocks, which is the same on both devices. `set_verified` records that the
+user compared it.
+
+There are no usernames, phone numbers, or emails. Multi-device is out of scope:
+each device is its own contact.
+
+## Contacts and first contact
+
+1. Alice scans Bob's card and calls `add_contact`.
+2. When Alice connects, she sends `MsgRequest::Hello { card }`. If Bob hasn't
+   added Alice, he answers `Rejected(NotAContact)` and his app gets a
+   `ContactRequest` event with Alice's card. Alice's queued messages wait.
+3. Once Bob accepts (`add_contact` with that card), either side can claim a
+   one-time key and open an Olm session.
+
+Only contacts can claim one-time keys or get Olm messages decrypted. Everything
+from non-contacts is rejected before decryption.
 
 ## Crypto
 
-All crypto comes from **vodozemac** (Matrix's audited Rust implementation of
-Olm and Megolm). Umbra doesn't implement any primitives itself.
+All of it comes from vodozemac, libp2p, and RustCrypto. There's no custom
+crypto.
 
-- **1:1 chats** use **Olm** (a Double Ratchet with X3DH-style session setup).
-  Since there's no server to host one-time keys, the inviting side's QR code or
-  invite link carries a fresh one-time key, and further one-time keys are
-  exchanged directly once a session exists.
-- **Groups** use **Megolm**. Each member creates an outbound Megolm session and
-  shares its session key with every other member over their pairwise Olm
-  sessions. The session is rotated when membership changes or after N messages
-  or T time (defaults to be decided in `core/`).
-- **Message envelope.** The plaintext is a serialized message (text,
-  attachment pointer, reaction, receipt, or call signal) with a random padding
-  bucket. It's encrypted by vodozemac, and the ciphertext and sender key ID go
-  in a small framed envelope on the wire.
-- **Attachments** are encrypted with a fresh random key (AES-256-GCM or
-  XChaCha20-Poly1305, to be decided) and sent as a separate stream. The key and
-  hash travel inside the E2E-encrypted message.
+- **1:1 only, Olm v1** (3DH plus Double Ratchet, compatible with libolm).
+  `SessionConfig::version_1()`, since v2 is still experimental in vodozemac.
+- **Session setup.** The sender claims a one-time key from the recipient over
+  `/umbra/keys/1`. The response is only trusted if its `identity_key` matches
+  the pinned one. Then the sender opens an outbound session, and the first
+  message is an Olm pre-key message (`t = 0`).
+- **Sessions.** Up to 4 per peer are kept (`MAX_SESSIONS_PER_PEER`), and the
+  oldest are pruned. Messages are encrypted with the most recently used
+  session. Decryption tries the matching session, and a pre-key message can
+  create a new inbound one. If both sides open sessions at once, they
+  converge, and there's a test for it.
+- **Plaintext** is a JSON `Payload { v, to, id, ts, body }`. `to` is the
+  intended recipient's PeerId and is checked after decryption, so ciphertext
+  sent to the wrong peer is rejected. `body` is `Text` or `Signal`.
+- **Not implemented yet:** groups (Megolm), attachments, padding, and
+  disappearing messages.
+
+## Wire protocols
+
+These run over libp2p request-response with the CBOR codec (`engine/proto.rs`).
+
+| Protocol | Request | Response |
+| --- | --- | --- |
+| `/umbra/msg/1` | `Hello { card }` or `Olm { t, c }` | `Ok`, `Delivered` (the delivery ack), or `Rejected(NotAContact / DecryptFailed / Malformed / Internal)` |
+| `/umbra/keys/1` | `ClaimOneTimeKey` | `Key { identity_key, one_time_key }` or `Refused(reason)` |
+| `/umbra/kad/1.0.0` | Kademlia | Umbra's own DHT protocol name, separate from the public IPFS DHT |
+| `/umbra/id/1.0.0` | identify | |
+
+Limits: text and signal payloads are each capped at 64 KiB, `call_id` at 128
+bytes. Requests time out after 20 s, and idle connections close after 300 s.
 
 ## Networking
 
-**rust-libp2p** with:
+`engine/net.rs` has two modes.
 
-- **Transports.** TCP and QUIC, plus the optional Tor transport (TCP only)
-  when built with `--features tor`.
-- **Security and muxing.** Noise XX and yamux (QUIC has its own TLS 1.3). The
-  Noise layer authenticates the `PeerId`, but Umbra does **not** rely on it for
-  confidentiality of content. That's vodozemac's job.
-- **Discovery.**
-  - Kademlia DHT to find a contact's current addresses by `PeerId`.
-  - mDNS on the LAN. **Off by default** and always off when Tor is on,
-    because it broadcasts presence.
-  - Contacts also gossip each other's last known addresses.
-- **NAT traversal.** AutoNAT, Circuit Relay v2, and DCUtR hole punching. Relays
-  only see ciphertext.
-- **Messaging protocol.** A request-response protocol
-  (`/umbra/msg/1.0.0`) carries envelopes, and each send is acked.
+**Clearnet (the default).** TCP, QUIC, and DNS, with Noise plus yamux (QUIC
+uses its own TLS). It also runs a circuit relay v2 client, DCUtR hole
+punching, identify, ping, and Kademlia. mDNS only runs if
+`CoreConfig.enable_mdns` is set. By default it listens on
+`0.0.0.0` and `::` over TCP and QUIC.
 
-### Offline delivery
+**Tor-only.** This happens when `tor_socks` is set (system Tor or Orbot,
+through `engine/socks.rs`) or in a build with the `tor` feature (embedded
+arti). In this mode:
 
-Pure P2P means a message can only be delivered while both devices are online.
-v1 handles this with an **outbox**: undelivered envelopes stay encrypted in the
-local store and are retried whenever the recipient becomes reachable.
-Store-and-forward through mutual contacts or relays (holding ciphertext with a
-TTL) is a possible later addition and needs its own threat-model pass.
+- dials are TCP through Tor only, with no QUIC and no clearnet,
+- nothing listens locally,
+- mDNS and DCUtR are off,
+- Kademlia runs in client mode,
+- identify hides listen addresses,
+- inbound connections only come through `relay_addrs` circuits.
 
-There are **no push notifications** through Google or Microsoft in v1. On
-Android, a foreground service keeps the swarm alive while the user allows it.
-The tradeoff (battery use, and only receiving messages while running) has to be
-spelled out to users.
+**Discovery.** Contacts' last-known addresses come from cards and `Hello`.
+Kademlia `get_closest_peers` finds peers that have moved. Bootstrap and relay
+peers come from `CoreConfig` (`bootstrap_addrs` and `relay_addrs`). Core doesn't
+ship any defaults, so who runs those nodes is an open decision. Hosting
+costs for relays and TURN are in
+[costs-and-sustainability.md](costs-and-sustainability.md).
 
-## Calls
+## Offline delivery (outbox)
 
-`calls/` uses **flutter_webrtc**.
+`send_text` saves the message and adds it to the `outbox` table. When a contact
+reconnects (or sends `Hello`), core greets them and sends that contact's queued
+messages in order. A message comes off the queue once it's `Delivered`. If the
+contact hasn't accepted us yet, the queue stops and waits for their `Hello`.
+Queued messages expire after **7 days** (`OUTBOX_TTL_MS`).
+Message delivery only happens while both devices are online at the same time.
+There's no store-and-forward and no push. Push notifications through Google or
+Microsoft would leak metadata to them, so they're deliberately left out.
 
-- **Signaling** (SDP offers and answers, ICE candidates, hangup) is sent as
-  ordinary Umbra messages, so it's end-to-end encrypted and authenticated by
-  Olm. No third-party signaling server is used.
-- **Media** runs over WebRTC's own DTLS-SRTP. The DTLS certificate fingerprint
-  is inside the SDP, and the SDP only travels through the encrypted channel, so
-  a relay or network attacker can't swap in their own fingerprint. That's what
-  makes calls end-to-end, not just hop-by-hop.
-- **ICE and TURN.** Direct or STUN-assisted connections reveal each peer's IP
-  to the other. A TURN relay hides it but needs a server, and which TURN
-  servers to use (if any, and whether self-hosted) is still open.
-- **Calls don't go through Tor.** WebRTC media is UDP, and Tor only carries
-  TCP. With Tor on, the app has to warn before a call that it'll reveal the
-  user's IP to the other person, or else force TURN.
+## Calls (contract for `calls/`)
 
-Group calls are out of scope for v1. A mesh of up to about 4 people would be
-possible later. Anything bigger needs an SFU, which doesn't fit a P2P design.
+`send_signal(peer, call_id, kind, payload)` sends `Offer`, `Answer`,
+`IceCandidate`, `Ringing`, `Reject`, or `Hangup` as an Olm-encrypted `Signal`
+payload. It isn't stored or queued, and it fails if the peer can't be reached
+right now (25 s timeout). Incoming signals show up as `CoreEvent::Signal`.
+
+Since the SDP only travels inside Olm, the DTLS fingerprint in it can't be
+swapped by a relay or network attacker. **`calls/` must only accept SDP that
+comes from `CoreEvent::Signal`**, or media isn't end-to-end.
+
+WebRTC media is UDP and never goes through Tor. Direct ICE reveals each side's
+IP to the other. The TURN policy (none, self-hosted, or user-set) is still open.
 
 ## Local storage
 
-- A SQLite database in the app's private directory, encrypted at rest
-  (SQLCipher or page-level encryption in `core/`, to be decided).
-- The database key is generated on first run and stored in the **OS keystore**
-  (Android Keystore, Windows DPAPI or Credential Manager, and Linux Secret
-  Service through libsecret). If that's not available, the app falls back to a
-  user passphrase run through Argon2id.
-- vodozemac `Account` and session pickles are stored inside that database,
-  encrypted with the pickle key.
-- On Android, the store is excluded from cloud and adb backups
-  (`android:allowBackup="false"` plus data extraction rules).
+- SQLCipher (`rusqlite 0.37`, `bundled-sqlcipher`, plus vendored OpenSSL on
+  Android, iOS, and Windows). The tables are `meta`, `contacts`,
+  `olm_sessions`, `messages`, and `outbox`.
+- `db_key` is 32 random bytes that **the app** generates and keeps in the OS
+  keystore (Android Keystore, Windows DPAPI, or libsecret). It's passed to
+  `init` and applied as a raw SQLCipher key. Core never writes it anywhere. If
+  the key is wrong, opening fails.
+- The Olm account and session pickles are also encrypted with
+  `HKDF-SHA256(db_key, salt "umbra-core", info "olm-pickle-v1")`.
+- Key material in core is wrapped in `zeroize::Zeroizing` where it's handled
+  directly (`db_key` pragma string, device key bytes, pickle key).
+- Message bodies are stored as plaintext *inside* the encrypted database,
+  because the UI needs them.
 
 ## FFI boundary
 
-`flutter_rust_bridge` generates the Dart bindings. The surface is kept small
-and coarse-grained, for example `send_message(chat_id, body)`,
-`stream_events() -> Stream<Event>`, and `start_call_signaling(peer)`. Rules:
+The API lives in `core/src/api/` (`umbra.rs` and `types.rs`), and the full
+reference is in [core-api.md](core-api.md). The main calls are `init`,
+`start_network`/`stop_network`, `events` (a stream of `CoreEvent`),
+`self_info`, `parse_qr`, `add_contact`, `set_verified`, `remove_contact`,
+`send_text`, `list_conversations`, `list_messages`, `mark_read`, and
+`send_signal`. `CoreConfig { mock: true }` runs an in-memory fake backend for
+UI work.
 
-- Private keys never cross the FFI boundary.
-- Errors cross as typed enums, not strings that have to be parsed.
-- Long-running work runs on the Rust tokio runtime, and Dart just awaits
-  futures or listens to streams.
+Private keys never cross to Dart. The one secret that crosses is `db_key`, and
+it goes **into** core from the app at `init`. `SelfInfo` and `Contact` only
+carry public keys and safety numbers.
 
 ## Build and release
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy, and tests for the Rust
-crates and analyze and test for the Flutter app, and it builds the Android APK,
-the Windows zip, and the Linux tarball and AppImage. Each job skips until its
-directory exists. Tagging `v*` runs `release.yml`, which attaches every
-artifact plus `SHA256SUMS` to a GitHub release. Android release signing reads
-the keystore from GitHub secrets only. Details are in [ci.md](ci.md) and
-`packaging/README.md`.
+There's CI for `core/` (fmt, clippy, tests with `--locked`, Rust 1.89 or newer)
+and, once they land, `app/` and the platform builds. Tagging `v*` makes a
+release with every artifact plus `SHA256SUMS`. Android signing comes only from
+secrets. The details are in [ci.md](ci.md).
 
 ## Open decisions
 
-1. Attachment cipher (AES-256-GCM vs XChaCha20-Poly1305).
-2. Encrypted-at-rest approach (SQLCipher vs encryption in `core/`).
-3. Megolm rotation defaults.
-4. TURN: none, self-hosted, or user-configurable.
-5. Store-and-forward for offline delivery.
-6. Whether QUIC stays on when Tor is on (it has to go off to avoid leaking the IP).
+1. Who runs the bootstrap and relay nodes, and whether core ships defaults.
+2. Groups: Megolm, and how rotation works.
+3. Attachments: how they're sent, the cipher, and size limits.
+4. Padding message sizes.
+5. TURN policy for calls, and what the UI says about the IP leak.
+6. Whether the `ik` should be signed with `ed` in the card. Defense in depth,
+   see the threat model.
+7. Store-and-forward for offline delivery.
 
-See [threat-model.md](threat-model.md) for what this design does and doesn't
-protect against.
+See [threat-model.md](threat-model.md) for what this does and doesn't protect.

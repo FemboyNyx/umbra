@@ -1,118 +1,125 @@
 # Umbra threat model
 
-Status: **draft**, written against the design in
-[architecture.md](architecture.md) before most of the code exists. Revisit it
-whenever the design changes, and before any release that's called "secure".
+Status: reviewed against `core/` at `119c53b`. `app/` and `calls/` haven't
+landed yet, so anything that depends on them is marked **(app)** or
+**(calls)** and is a requirement, not something that's been checked. The
+design is described in [architecture.md](architecture.md).
 
 ## What we protect
 
 | Asset | Why it matters |
 | --- | --- |
-| Message and attachment contents | The core promise of the app |
+| Message contents | The core promise of the app |
 | Call audio and video | Same as messages |
-| Private keys (libp2p, vodozemac account, session state) | Whoever has them can read and impersonate |
+| Private keys (libp2p Ed25519, Olm account, sessions) and `db_key` | Whoever has them can read and impersonate |
 | The social graph (who talks to whom) | Often as sensitive as content |
 | IP address and location | Can identify the person and where they are |
-| Activity timing (when someone's online or sending) | Reveals patterns of life |
-| Local message history | Exposed if a device is lost or seized |
+| Activity timing | Reveals patterns of life |
+| Local history (`messages`, `contacts`, `outbox`) | Exposed if a device is lost or seized |
 
 ## Who we defend against
 
-1. **A passive network observer**, such as an ISP, public Wi-Fi, or a
-   government tap on a link. They can see packets, but they can't change them.
+1. **A passive network observer**, such as an ISP, public Wi-Fi, or a tap on
+   a link.
 2. **An active network attacker** who can intercept, change, drop, or replay
    traffic, or impersonate a peer.
-3. **Malicious infrastructure peers**, meaning DHT nodes, circuit relays,
-   TURN servers, and Tor relays, which are run by people we don't know.
-4. **A malicious or compromised contact**, someone the user chose to talk to.
-5. **A stranger** who knows or guesses a `PeerId` and tries to message,
-   spam, or probe the user.
-6. **Someone who gets the device** while it's locked (lost, stolen, or
-   seized) or, as a weaker case, while it's unlocked.
-7. **A supply-chain attacker** who goes after dependencies, CI, or release
-   artifacts.
+3. **Infrastructure peers** we don't control, meaning DHT nodes, circuit
+   relays, TURN servers, and Tor relays.
+4. **A malicious contact.**
+5. **A stranger** who knows a `PeerId`.
+6. **Someone who gets the device**, locked or unlocked.
+7. **A supply-chain attacker** who goes after dependencies, CI, or releases.
 
-### Out of scope
+**Out of scope:** a compromised OS or malware on the device, a global passive
+adversary, someone forced to unlock their device, and what the recipient does
+with messages after they're decrypted.
 
-- A fully compromised OS or device, such as malware with root, a keylogger, or
-  screen capture. No messenger can defend against that.
-- A **global passive adversary** who can correlate traffic across the whole
-  internet. Even Tor doesn't promise protection against that.
-- Rubber-hose attacks, meaning someone forced to unlock their device.
-- What the other person does with messages after they decrypt them
-  (screenshots, forwarding).
+## Threats, mitigations, and what's left
 
-## Threats and mitigations
+### Content
 
-### Confidentiality and integrity of content
-
-| Threat | Mitigation | Residual risk |
+| Threat | Mitigation in code | What's left |
 | --- | --- | --- |
-| A network attacker reads or changes messages | vodozemac Olm and Megolm (authenticated encryption) over libp2p Noise or TLS | None known, assuming vodozemac is correct |
-| MITM at contact-add time | Keys exchanged by QR code or an invite link through a trusted channel, plus safety-number comparison | Invite links pasted into untrusted channels can be swapped. The UI should push people toward QR codes or verifying |
-| A key change gets silently accepted | Pinned keys; any change is a hard warning and needs re-verification | Users click through warnings |
-| Replayed messages | Olm and Megolm message indices, and rejecting duplicates | Megolm doesn't give post-compromise security within a session, so rotate it |
-| A compromised session key exposes old messages | The Olm ratchet gives forward secrecy | Megolm only gives forward secrecy at rotation boundaries |
-| Call media MITM | DTLS fingerprints only travel inside E2E-encrypted signaling | Depends on the SDP never coming from anywhere else, so `calls/` must enforce that |
-| A malicious attachment exploits the parser | Size limits, decoding in a sandbox or isolate where possible, and no auto-open | Decoders for images and video are a real attack surface |
+| A network attacker reads or changes messages | Olm v1 (vodozemac) inside Noise/yamux or QUIC TLS. Tampered ciphertext fails to decrypt without breaking the session (tested) | None known, assuming vodozemac is correct |
+| Ciphertext sent to the wrong peer | `Payload.to` is checked against our PeerId after decryption | None |
+| MITM when adding a contact | `validate_card` checks that `ed` derives `peer`, and keys are pinned at `add_contact` | An `umbra://` link pasted through an untrusted channel can be swapped wholesale. **(app)** should prefer QR codes and push people to compare safety numbers |
+| A key gets swapped after the contact is added | Changed keys are refused in `add_contact`, in `Hello` (`Malformed`), and in one-time-key responses | **The user isn't told.** A `Hello` with changed keys only logs a warning, and there's no `CoreEvent`. Recommendation: emit a `KeyChanged` event so **(app)** can show it |
+| `ik` isn't signed by `ed` | `ik` is only accepted from the card or from a Noise session authenticated as that PeerId | Fine for now. Signing `ik` with `ed` in the card would let any copy of the card be checked on its own |
+| One-time key abuse | Only contacts can claim OTKs. Each claim makes a fresh OTK (falling back to the fallback key), and the response's `identity_key` has to match the pinned one | A malicious contact can claim over and over. vodozemac keeps only a limited number of OTKs, so that could push out a key another contact claimed but hasn't used yet, and that contact's first message would fail with `DecryptFailed` and then retry. Rate-limit claims per peer |
+| Replay | Olm message indices and ratchet state | None for Olm. The app has to treat message IDs as unique too |
+| Compromise of current session keys | The Double Ratchet gives forward secrecy and heals after a compromise | The newest 4 sessions per peer are kept |
+| Call media MITM | SDP only travels as an Olm `Signal` payload | **(calls)** has to reject SDP from any other source, and that's the most important invariant for calls |
+| Oversized input | Text and signals capped at 64 KiB, `call_id` at 128 bytes, request timeouts | The CBOR and JSON decoders run on peer input and should be fuzzed |
 
 ### Metadata
 
-| Threat | Mitigation | Residual risk |
+| Threat | Mitigation in code | What's left |
 | --- | --- | --- |
-| A network observer sees who you connect to | Optional Tor transport ([tor.md](tor.md)) | Off by default. Without Tor, IPs are visible |
-| DHT nodes learn your `PeerId`, IP, and lookups | Can't be avoided with a public DHT. Contact address gossip cuts down on lookups | **High.** DHT queries for a `PeerId` show interest in it. A private or friends-only DHT mode is a possible later option |
-| Relays learn who's talking to whom | Relays only see ciphertext | Relays see both peers' `PeerId`s and timing |
-| A peer learns your IP during a call | Warn before calls; optionally force TURN | Calls can't use Tor |
-| mDNS broadcasts presence on the LAN | Off by default and forced off with Tor | None when it's off |
-| Message size and timing analysis | Padding buckets | Timing isn't hidden. Cover traffic is out of scope for v1 |
-| `PeerId`s stay the same forever, so they can be tracked | None in v1 | **High.** Rotating routing identities apart from the vodozemac identity is a future option |
+| A network observer sees who you talk to (clearnet) | None. Direct TCP/QUIC reveals both IPs | **High.** Tor-only mode is the mitigation, and it's opt-in |
+| The same in Tor-only mode | SOCKS5 (`tor_socks`) or embedded arti. No QUIC, no listening, no mDNS, no DCUtR, Kad in client mode, listen addresses hidden from identify | The relay sees both PeerIds and timing. Calls aren't covered |
+| DHT nodes learn interest in a PeerId | Only used to find peers that moved, and contacts' known addresses go first. Umbra has its own Kad protocol name | **High.** `get_closest_peers(peer)` shows who is looking for whom |
+| PeerIds never change, so they're trackable | None | **High.** Every relay and DHT node sees the same ID across networks. Rotating routing IDs is future work |
+| mDNS broadcasts on the LAN | Off unless `enable_mdns`, and always off with Tor | **(app)** should keep it off by default and explain what it does |
+| A peer learns your IP during a call | None in core | **(calls)/(app)** have to warn before a call or force TURN, especially in Tor mode |
+| Size and timing analysis | None. No padding | Messages leak their length. Padding buckets are on the list |
+| Strangers probe whether you're online | A `Hello` from a non-contact gets `NotAContact` | Even a refusal confirms the peer is online, and every probe makes a `ContactRequest` event |
 
 ### Availability and abuse
 
-| Threat | Mitigation | Residual risk |
+| Threat | Mitigation in code | What's left |
 | --- | --- | --- |
-| Spam from strangers | Only contacts who've been added can open an Olm session, and everything else gets dropped before it's decrypted | Connection-level floods still use battery and bandwidth, so add rate limits per `PeerId` |
-| A Sybil or eclipse attack on the DHT | Kademlia's default protections, and gossiping with contacts | A determined attacker can block discovery |
-| Messages lost because both peers are never online together | Outbox and retries | Can't be fully fixed without store-and-forward |
+| A flood of contact requests | Non-contacts can't claim keys or have messages decrypted | Unlimited `ContactRequest` events. **(app)** needs a rate limit or collapse repeats, and core should rate-limit per PeerId |
+| Eclipse or Sybil attacks on the DHT | Contacts' addresses from cards and `Hello` don't depend on the DHT | A determined attacker can hide peers that have moved |
+| A relay operator drops traffic | Several `relay_addrs` can be used | Tor-only users depend on relays to be reachable at all |
+| Undelivered messages | Outbox with ordered retries | Messages expire after 7 days. **(app)** has to show expired messages as failed |
 
 ### The device
 
-| Threat | Mitigation | Residual risk |
+| Threat | Mitigation in code | What's left |
 | --- | --- | --- |
-| A stolen or seized locked device | DB encrypted at rest, key in the OS keystore | Depends on how strong the OS keystore is, which varies a lot on Linux |
-| A stolen unlocked device | Optional app lock (PIN or biometric), and messages that disappear on a timer | An unlocked device with the app open is game over |
-| Cloud or adb backups leaking the DB | Backups disabled on Android | Desktop backup tools may still copy the data dir, so document it |
-| Plaintext in logs or crash reports | No content or keys in logs, no third-party crash reporting, and `Debug` impls that redact | Needs review and tests |
-| Keys left in memory | `zeroize` on key material in `core/` | Dart strings with plaintext can't be reliably wiped |
+| A stolen or seized locked device | SQLCipher database, plus pickles encrypted with an HKDF-derived key | Only as strong as the OS keystore that holds `db_key` **(app)**. Linux without Secret Service needs a passphrase fallback (Argon2id) |
+| A stolen unlocked device | None in core | **(app)**: optional app lock. Disappearing messages are on the list |
+| Backups copy the database | The database is encrypted | **(app)**: Android `allowBackup="false"` and data extraction rules, so `db_key` and the database aren't backed up together |
+| Keys left in memory | `Zeroizing` on the `db_key` pragma, device key bytes, and the pickle key | The Olm account and sessions are in memory while running. Dart strings with plaintext can't be wiped |
+| Plaintext in logs | Core logs PeerIds and events, not message bodies | Needs a check that no `Debug` print of a `Payload` reaches logs |
 
 ### Supply chain
 
-| Threat | Mitigation | Residual risk |
+| Threat | Mitigation | What's left |
 | --- | --- | --- |
-| A malicious crate or pub package | Committed lockfiles, `cargo audit` and `cargo deny` in CI, a small dependency list | Transitive dependencies are large (arti and libp2p especially) |
-| A CI compromise or leaked secrets | Secrets only in GitHub secrets, release signing only on tag workflows, no secrets for PRs from forks, and actions pinned to commit SHAs | A compromised maintainer account is game over |
-| Tampered release downloads | `SHA256SUMS` on every release, Android APK signing, and later signing the checksums (minisign or Sigstore) | The checksum file is only as trustworthy as the release page until it's signed |
-| Non-reproducible builds | Pinned toolchains | Reproducible builds are a future goal |
+| A malicious dependency | `Cargo.lock` committed, CI builds with `--locked`, frb pinned to `=2.13.0` | Transitive dependencies are large (libp2p, arti). Adding `cargo audit` and `cargo deny` to CI is recommended |
+| A CI compromise or leaked secrets | Signing secrets only in GitHub secrets, release builds only on tags | Pinning third-party actions to commit SHAs is recommended |
+| Tampered downloads | `SHA256SUMS` on releases, Android APK signing | Unsigned checksums. Signing them (minisign or Sigstore) is recommended |
 
 ## Security invariants
 
-These should be enforced in code and covered by tests:
+These are checked against `119c53b`.
 
-1. Nothing goes on the wire unless it's been encrypted by vodozemac.
-2. Private keys never leave `core/` and never cross the FFI boundary.
-3. A message from a `PeerId` whose pinned vodozemac key doesn't match gets
-   dropped and raises a warning.
-4. When Tor is on, QUIC, mDNS, and direct dials are off, and every libp2p dial
-   goes through `umbra-tor`. Tests check that no other transport gets used.
-5. Call SDP is only accepted from inside an established Olm session.
-6. Logs never contain plaintext, keys, or full `PeerId`s at info level or
-   above.
+| # | Invariant | Status |
+| --- | --- | --- |
+| 1 | No message content goes on the wire unless Olm encrypted it | **Holds.** Only `Hello` (public card) and `KeysRequest` are in the clear inside Noise |
+| 2 | Private keys never cross to Dart | **Holds.** Only `db_key` crosses, going into core |
+| 3 | Messages, OTK responses, and `Hello` with keys that don't match the pins are rejected | **Holds**, but the user isn't told (no event) |
+| 4 | Tor-only mode means no QUIC, listening, mDNS, DCUtR, or clearnet dials | **Holds** by how the transport is built. Needs a test that checks no non-Tor dial happens |
+| 5 | Call SDP is only accepted from an Olm `Signal` | **Core holds** (signals only come from decrypted payloads). **(calls)** has to enforce it |
+| 6 | Logs never contain plaintext or keys | Not checked by tests |
+| 7 | Nothing from a non-contact is decrypted or stored | **Holds.** It's rejected with `NotAContact` |
+
+## Recommended follow-ups (in priority order)
+
+1. **core:** emit `CoreEvent::KeyChanged { peer_id }` when a `Hello` or
+   one-time-key response has keys that don't match the pins.
+2. **calls:** only take SDP and ICE from `CoreEvent::Signal`, and warn about
+   the IP leak before a call in Tor mode.
+3. **core:** rate-limit `Hello` and `ContactRequest` per PeerId.
+4. **ci:** add `cargo audit`/`cargo deny`, pin actions to SHAs, and sign
+   `SHA256SUMS`.
+5. **core:** add a test that Tor-only mode never dials outside Tor.
+6. **core:** padding buckets for `Payload`, and fuzzing for the CBOR and JSON
+   decoders.
+7. **core:** consider signing `ik` with `ed` in the card.
 
 ## Before calling it secure
 
-- An external review of `core/` (crypto use, FFI, storage) and the call
-  signaling path.
-- Fuzzing the envelope parser and anything that decodes peer input.
-- A written and tested key-change UX.
-- Updating this document to match the code.
+An external review of `core/` and the call signaling path, fuzzing, a tested
+key-change UX, and an update to this document to match the code.
