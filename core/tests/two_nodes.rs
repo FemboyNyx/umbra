@@ -258,6 +258,88 @@ async fn co_members_deliver_server_payloads_via_outbox() {
 
 #[cfg(not(feature = "tor"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invite_join_and_kick_over_the_network() {
+    init_tracing();
+    let mut a = node(11, "Alice").await;
+    let mut b = node(12, "Bob").await;
+    let sid = a
+        .core
+        .create_server("Den", vec![], Some("Owner Al".into()))
+        .unwrap()
+        .server
+        .server_id;
+    let link = a
+        .core
+        .create_invite(&sid, InviteOptions::default())
+        .unwrap()
+        .link;
+    // Strangers: no contact relationship, only the invite.
+    let info = b
+        .core
+        .join_server(&link, Some("Bobby".into()))
+        .await
+        .unwrap();
+    assert_eq!(info.status, ServerStatus::Joining);
+    wait_for(&mut b, |e| {
+        matches!(e, CoreEvent::Server { event: ServerEvent::Joined, server_id } if *server_id == sid)
+    })
+    .await;
+    let bi = b.core.server_info(&sid).unwrap();
+    assert_eq!((bi.status, bi.member_count), (ServerStatus::Active, 2));
+    assert!(bi.history_shared, "history is shared by default");
+    let names: Vec<String> = a
+        .core
+        .list_members(&sid)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.display_name)
+        .collect();
+    assert!(names.contains(&"Bobby".to_string()));
+    assert!(
+        a.core.list_contacts().unwrap().is_empty(),
+        "joining makes no contacts"
+    );
+
+    // A used invite is refused over the wire too.
+    let mut c = node(13, "Carol").await;
+    let err = c.core.join_server(&link, None).await.unwrap_err();
+    assert!(format!("{err:#}").contains("InviteInvalid"), "{err:#}");
+
+    // The owner creates a channel and then kicks Bob; Bob is told directly.
+    a.core.create_channel(&sid, "news").unwrap();
+    wait_for(&mut b, |e| {
+        matches!(
+            e,
+            CoreEvent::Server {
+                event: ServerEvent::Updated { seq: 2 },
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(b.core.list_channels(&sid).unwrap().len(), 2);
+    a.core.kick(&sid, &b.core.peer_id().to_base58()).unwrap();
+    wait_for(&mut b, |e| {
+        matches!(
+            e,
+            CoreEvent::Server {
+                event: ServerEvent::Removed {
+                    reason: MemberLeftReason::Kicked
+                },
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(
+        b.core.server_info(&sid).unwrap().status,
+        ServerStatus::Removed
+    );
+    let _ = &mut c;
+}
+
+#[cfg(not(feature = "tor"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outbox_survives_offline_peer() {
     init_tracing();
     let mut a = node(3, "A").await;
