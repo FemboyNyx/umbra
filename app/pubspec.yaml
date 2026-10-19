@@ -1,0 +1,47 @@
+name: umbra
+description: Peer-to-peer, end-to-end encrypted messenger. Talk in the shadows.
+publish_to: none
+# License: AGPL-3.0-or-later (see ../LICENSE).
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.9.2 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Elite pin. Exact 2.13.0 (no caret). CI matches =2.13.0.
+  flutter_rust_bridge: 2.13.0
+  path_provider: ^2.1.5
+  shared_preferences: ^2.5.3
+  # Required by flutter_rust_bridge codegen for CoreEvent.
+  freezed_annotation: ^3.1.0
+  # Cargokit glue. Builds ../core when cargo is on PATH; otherwise a stub.
+  rust_lib_umbra:
+    path: rust_builder
+  umbra_calls:
+    path: ../calls
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  # Windows MSIX packaging. CI looks for a `msix:` dependency line.
+  msix: ^3.16.12
+  freezed: ^3.1.0
+  build_runner: ^2.4.15
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/branding/umbra-icon-concept.jpg
+
+# Optional Windows store package. Zip remains the default release artifact
+# when WINDOWS_CERT_* secrets are absent (see packaging/windows/README.md).
+msix_config:
+  display_name: Umbra
+  publisher_display_name: FemboyNyx
+  identity_name: io.github.femboynyx.umbra
+  msix_version: 0.1.0.0
+  logo_path: ../packaging/icons/umbra-256.png
+  capabilities: internetClient, microphone, webcam

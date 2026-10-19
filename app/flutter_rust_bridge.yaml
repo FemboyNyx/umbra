@@ -1,0 +1,6 @@
+# Codegen pin: flutter_rust_bridge_codegen 2.13.0
+# Must match the Dart dependency flutter_rust_bridge: =2.13.0 exactly.
+# Paths are relative to this file (app/).
+rust_input: crate::api
+rust_root: ../core
+dart_output: lib/src/rust

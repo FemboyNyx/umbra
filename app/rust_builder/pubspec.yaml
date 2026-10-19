@@ -1,0 +1,22 @@
+name: rust_lib_umbra
+description: Builds umbra_core (flutter_rust_bridge / cargokit) into the Umbra app.
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ">=3.9.2 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      linux:
+        ffiPlugin: true
+      windows:
+        ffiPlugin: true
