@@ -24,7 +24,7 @@ runs on the same ref.
 | Job | When it runs | What it does | Artifacts |
 |-----|--------------|--------------|-----------|
 | `detect` | always | Sets `has_core` / `has_app` from `core/Cargo.toml` and `app/pubspec.yaml` | — |
-| `rust-core` | `has_core == true` | Rust from `core/rust-toolchain.toml` via `rustup toolchain install`, then `cargo fmt --check`, `cargo clippy --locked …`, `cargo test --locked --all-features` in `core/` (+ Swatinem/rust-cache) | — |
+| `rust-core` | `has_core == true` | Rust from `core/rust-toolchain.toml` via `rustup toolchain install`, then `cargo fmt --check`, `cargo clippy --locked …`, `cargo test --locked --all-features` in `core/` (+ Swatinem/rust-cache). Once `umbra-tor` is a workspace member, also `cargo clippy -p umbra-tor --all-targets --features tor-listen -- -D warnings` and `cargo test -p umbra-tor --features tor-listen` (offline); skipped until then | — |
 | `flutter-analyze` | `has_app == true` | `flutter pub get`, enforce `flutter_rust_bridge` `=2.13.0` when present in pubspec, then `analyze` / `test` | — |
 | `build-android` | `has_app == true` | Java 17, NDK r26d, Android targets from `core/rust-toolchain.toml`, `perl`+`make` (SQLCipher/OpenSSL), signing or debug fallback, `flutter build apk` | `umbra-android-apk` |
 | `build-windows` | `has_app == true` | `flutter build windows --release`, then `packaging/windows/build-zip.ps1`; optional MSIX when cert secrets + `msix` in pubspec | `umbra-windows` (`dist/*.zip`, optional `dist/*.msix`) |

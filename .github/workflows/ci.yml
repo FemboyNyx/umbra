@@ -70,6 +70,26 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --locked --all-features
+      # Root-package clippy/test only build umbra-tor as a dependency (feature
+      # `tor`). Exercise its full feature set (`tor-listen` implies `tor`) once
+      # it is a workspace member; skip cleanly until then. Tests are offline.
+      - name: Detect umbra-tor workspace member
+        id: tor
+        run: |
+          set -euo pipefail
+          meta="$(cargo metadata --locked --no-deps --format-version 1)"
+          if jq -e '.packages[] | select(.name == "umbra-tor")' <<<"$meta" >/dev/null; then
+            echo "member=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "umbra-tor is not a workspace member yet; skipping tor-listen checks."
+            echo "member=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: clippy (umbra-tor, tor-listen)
+        if: steps.tor.outputs.member == 'true'
+        run: cargo clippy --locked -p umbra-tor --all-targets --features tor-listen -- -D warnings
+      - name: test (umbra-tor, tor-listen)
+        if: steps.tor.outputs.member == 'true'
+        run: cargo test --locked -p umbra-tor --features tor-listen
 
   flutter-analyze:
     name: Flutter analyze / test
