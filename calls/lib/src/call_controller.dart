@@ -7,6 +7,14 @@ import 'call_session.dart';
 import 'ice_config.dart';
 import 'signaling.dart';
 
+/// Shown when Tor mode is on and no TURN relay is configured.
+const String torRelayRequiredMessage = 'Calls over Tor need a relay server.';
+
+/// Thrown when a call can't start for privacy reasons. [code] is one of:
+/// - `ack_required`: user must acknowledge [preCallIpWarning] first.
+/// - `turn_required`: Relay only is on but no TURN server is configured.
+/// - `tor_relay_required`: Tor mode is on but no TURN server is configured.
+///   This one cannot be bypassed with `skipPrivacyCheck`.
 class CallPrivacyException implements Exception {
   CallPrivacyException(this.code, this.message);
   final String code;
@@ -45,6 +53,21 @@ class CallController {
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
+  /// Tor mode never falls back to direct; enforced even with skipPrivacyCheck.
+  void _assertTorRelay() {
+    if (iceConfig.torRelayBlocked) {
+      throw CallPrivacyException('tor_relay_required', torRelayRequiredMessage);
+    }
+  }
+
+  /// True when the app should show [torRelayRequiredMessage] instead of a
+  /// call button.
+  bool get callsBlockedByTor => iceConfig.torRelayBlocked;
+
+  void setTorMode(bool enabled) {
+    iceConfig = iceConfig.withTorMode(enabled);
+  }
+
   void _assertMayStartMedia() {
     if (privacy.shouldShowPreCallWarning) {
       throw CallPrivacyException('ack_required', preCallIpWarningShort);
@@ -70,6 +93,7 @@ class CallController {
     CallMediaMode mediaMode = CallMediaMode.audioOnly,
     bool skipPrivacyCheck = false,
   }) async {
+    _assertTorRelay();
     if (!skipPrivacyCheck) _assertMayStartMedia();
     if (active != null &&
         active!.state != CallSessionState.ended &&
@@ -175,6 +199,7 @@ class CallController {
       kind == SignalKind.iceCandidate;
 
   Future<void> acceptIncoming({bool skipPrivacyCheck = false}) async {
+    _assertTorRelay();
     if (!skipPrivacyCheck) _assertMayStartMedia();
     await active?.accept();
   }

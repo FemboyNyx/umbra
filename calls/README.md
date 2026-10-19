@@ -22,4 +22,5 @@ Android, Windows, Linux (same stack as the rest of Umbra).
 ## Privacy
 - Pre-call IP / Tor warning strings live in `call_privacy.dart`.
 - `CallController.setRelayOnly(true)` forces TURN-only ICE (`iceTransportPolicy: relay`).
+- `CallController.setTorMode(true)` always forces relay-only and never uses STUN. With no TURN server, `startCall`/`acceptIncoming` throw `CallPrivacyException('tor_relay_required')` ("Calls over Tor need a relay server."), even with `skipPrivacyCheck`; check `callsBlockedByTor` to show that in the UI. There is no fallback to direct.
 - TURN credentials are never hardcoded — set via `setTurnServers`.
