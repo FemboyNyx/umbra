@@ -23,6 +23,7 @@ jobs:
     outputs:
       has_core: ${{ steps.check.outputs.has_core }}
       has_app: ${{ steps.check.outputs.has_app }}
+      has_calls: ${{ steps.check.outputs.has_calls }}
     steps:
       - uses: actions/checkout@v4
       - id: check
@@ -36,6 +37,11 @@ jobs:
             echo "has_app=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_app=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f calls/pubspec.yaml ]; then
+            echo "has_calls=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_calls=false" >> "$GITHUB_OUTPUT"
           fi
 
   rust-core:
@@ -99,6 +105,33 @@ jobs:
       - name: test
         working-directory: app
         run: flutter test
+
+  flutter-calls:
+    name: Flutter analyze / test (calls)
+    needs: detect
+    if: needs.detect.outputs.has_calls == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: calls
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: pub get
+        run: flutter pub get
+      - name: analyze
+        run: flutter analyze
+      - name: test
+        run: |
+          set -euo pipefail
+          if [ -d test ] && find test -name '*_test.dart' | grep -q .; then
+            flutter test
+          else
+            echo "No tests in calls/test yet; skipping."
+          fi
 
   build-android:
     name: Build Android APK
@@ -316,7 +349,7 @@ jobs:
 
   ci-gate:
     name: CI gate
-    needs: [detect, rust-core, flutter-analyze, build-android, build-windows, build-linux]
+    needs: [detect, rust-core, flutter-analyze, flutter-calls, build-android, build-windows, build-linux]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -325,10 +358,12 @@ jobs:
           set -euo pipefail
           echo "has_core=${{ needs.detect.outputs.has_core }}"
           echo "has_app=${{ needs.detect.outputs.has_app }}"
+          echo "has_calls=${{ needs.detect.outputs.has_calls }}"
           # Skipped jobs (missing folders) are fine; failed required jobs are not.
           for result in \
             "${{ needs.rust-core.result }}" \
             "${{ needs.flutter-analyze.result }}" \
+            "${{ needs.flutter-calls.result }}" \
             "${{ needs.build-android.result }}" \
             "${{ needs.build-windows.result }}" \
             "${{ needs.build-linux.result }}"
