@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:umbra_calls/umbra_calls.dart' show torRelayRequiredMessage;
 
+import '../calls/outgoing_call.dart';
 import '../core/core_errors.dart';
 import '../core/mock_umbra_core.dart';
 import '../core/umbra_core.dart';
@@ -44,6 +46,17 @@ class UmbraController extends ChangeNotifier {
   String? callNotice;
   List<MissedCallNotice> missedCallNotices = const [];
   final Map<String, KeyChangeNotice> keyChanges = {};
+
+  /// Set once the call stack is attached. Null until then, so Start call
+  /// stays disabled during launch and never touches WebRTC.
+  OutgoingCallGuard? outgoing;
+
+  /// True only while the audio probe or `startCall` is in flight.
+  /// The calling banner stays hidden until [activeCallPeerId] is set.
+  bool callStarting = false;
+
+  /// Peer we are ringing. Null when the UI is idle.
+  String? activeCallPeerId;
 
   /// Applies Tor mode on the live [CallController] when the SOCKS setting changes.
   void Function(bool enabled)? applyTorMode;
@@ -117,6 +130,87 @@ class UmbraController extends ChangeNotifier {
   void dismissCallNotice() {
     if (callNotice == null) return;
     callNotice = null;
+    notifyListeners();
+  }
+
+  bool keyChangePending(String peerId) {
+    if (keyChanges.containsKey(peerId)) return true;
+    return contactFor(peerId)?.keyChanged ?? false;
+  }
+
+  /// Start call is available for this contact.
+  bool canStartCall(String peerId) {
+    if (outgoing == null || callsBlockedByTor) return false;
+    if (callStarting || activeCallPeerId != null) return false;
+    if (contactFor(peerId) == null) return false;
+    if (keyChangePending(peerId)) return false;
+    return true;
+  }
+
+  String startCallTooltip(String peerId) {
+    if (callsBlockedByTor) return torRelayRequiredMessage;
+    if (keyChangePending(peerId)) return 'Safety number changed';
+    if (activeCallPeerId != null) return 'A call is already active';
+    return 'Start call';
+  }
+
+  /// Probe, then start an outgoing call. Failures stay idle: no calling
+  /// banner, and no Ringing unless the peer was already invited.
+  Future<void> startOutgoingCall(String peerId) async {
+    final guard = outgoing;
+    if (guard == null || !canStartCall(peerId)) return;
+    callStarting = true;
+    callNotice = null;
+    notifyListeners();
+    try {
+      await guard.start(peerId);
+      if (guard.client.hasActiveCall) {
+        activeCallPeerId = peerId;
+      }
+    } on NoAudioDeviceException catch (err) {
+      activeCallPeerId = null;
+      callNotice = err.message;
+    } on CallStartException catch (err) {
+      activeCallPeerId = null;
+      callNotice = err.message;
+    } catch (err, stack) {
+      debugLogCoreError(err, stack);
+      activeCallPeerId = null;
+      callNotice = userFacingCallError(err);
+    } finally {
+      callStarting = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> cancelOutgoingCall() async {
+    final client = outgoing?.client;
+    try {
+      await client?.cancelCall();
+    } catch (err, stack) {
+      debugLogCoreError(err, stack);
+      callNotice = userFacingCallError(err);
+    } finally {
+      activeCallPeerId = null;
+      callStarting = false;
+      notifyListeners();
+    }
+  }
+
+  /// Remote hangup, reject, or our own teardown finished.
+  void noteCallEnded() {
+    if (activeCallPeerId == null) return;
+    activeCallPeerId = null;
+    notifyListeners();
+  }
+
+  void noteCallFailed(Object err) {
+    final stillUp = outgoing?.client.hasActiveCall ?? false;
+    callNotice = userFacingCallError(err);
+    if (!stillUp) {
+      activeCallPeerId = null;
+      callStarting = false;
+    }
     notifyListeners();
   }
 
@@ -364,11 +458,10 @@ class UmbraController extends ChangeNotifier {
               );
             } catch (err, stack) {
               debugLogCoreError(err, stack);
-              final text = err.toString();
-              if (text.contains('no_audio_device') ||
-                  text.contains('No audio device')) {
-                callNotice = 'No audio device is available.';
-                notifyListeners();
+              final stillUp = outgoing?.client.hasActiveCall ?? false;
+              if (isAudioSetupFailure(err) ||
+                  (activeCallPeerId != null && !stillUp)) {
+                noteCallFailed(err);
               }
             }
           }());

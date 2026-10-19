@@ -7,6 +7,7 @@ import '../state/umbra_controller.dart';
 import '../theme/umbra_theme.dart';
 import 'contact_detail_screen.dart';
 import 'key_change_banner.dart';
+import 'start_call_button.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.controller, required this.peerId});
@@ -100,6 +101,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
+          StartCallButton(controller: widget.controller, peerId: widget.peerId),
           IconButton(
             tooltip: 'Contact details',
             onPressed: contact == null
@@ -120,6 +122,10 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
+          CallStatusBanner(
+            controller: widget.controller,
+            peerId: widget.peerId,
+          ),
           for (final notice in widget.controller.keyChangeNotices)
             if (notice.peerId == widget.peerId)
               Padding(

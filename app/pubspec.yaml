@@ -21,6 +21,9 @@ dependencies:
     path: rust_builder
   umbra_calls:
     path: ../calls
+  # Used only by the Start call audio probe. Native ADM init stays deferred
+  # until that probe runs; importing the package does not open a device.
+  flutter_webrtc: ^0.12.1+hotfix.1
 
 dev_dependencies:
   flutter_test:
