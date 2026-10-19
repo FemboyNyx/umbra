@@ -50,4 +50,29 @@ void main() {
     );
     expect(ok.toPeerConnectionConfig()['iceTransportPolicy'], 'relay');
   });
+
+  test('fromCore ignores routing fields injected in the payload', () {
+    final msg = CallSignalMessage.fromCore(
+      peerId: 'mallory',
+      localPeerId: 'local',
+      callId: 'c1',
+      kindWire: 'Ringing',
+      payload: {
+        'from': 'bob',
+        'fromPeerId': 'bob',
+        'peer_id': 'bob',
+        'callId': 'bobs-call',
+        'to': 'someone-else',
+        'kind': 'Answer',
+        'type': 'Answer',
+        'media': 'av',
+      },
+    );
+    expect(msg, isNotNull);
+    expect(msg!.fromPeerId, 'mallory');
+    expect(msg.callId, 'c1');
+    expect(msg.toPeerId, 'local');
+    expect(msg.kind, SignalKind.ringing);
+    expect(msg.mediaMode, CallMediaMode.audioVideo);
+  });
 }

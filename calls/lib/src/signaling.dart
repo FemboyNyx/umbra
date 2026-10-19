@@ -165,12 +165,16 @@ class CallSignalMessage {
     required String kindWire,
     Map<String, Object?> payload = const {},
   }) {
+    // Routing fields come only from core's authenticated Signal event. The
+    // payload is written by the remote peer, so it is spread first and can
+    // never override who sent the signal, which call it is for, or its kind.
     return parse({
+      ...payload,
       'kind': kindWire,
+      'type': kindWire,
       'callId': callId,
       'from': peerId,
       'to': localPeerId,
-      ...payload,
     });
   }
 }
