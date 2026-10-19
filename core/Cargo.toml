@@ -1,0 +1,86 @@
+# Umbra core workspace.
+#
+# Members:
+#   - `.`    umbra_core: identity, Olm E2EE, libp2p transport, SQLCipher store,
+#            flutter_rust_bridge v2 API in src/api/.
+#   - `tor`  umbra-tor (Coding Backup / Val): optional Tor transport. When
+#            `core/tor/` lands, uncomment "tor" below (cargo refuses missing
+#            members, so it can't be listed before the directory exists).
+[workspace]
+members = [
+    ".",
+    # "tor",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-or-later"
+rust-version = "1.89"
+
+[workspace.dependencies]
+# Pinned to the 0.55 line to match umbra-tor (arti 0.35). Bump both together.
+libp2p = { version = "0.55", default-features = false }
+
+[package]
+name = "umbra_core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+# vodozemac 0.11 requires rustc >= 1.89.
+rust-version.workspace = true
+description = "Umbra core: identity, Olm E2EE, libp2p transport and encrypted store, exposed to Flutter via flutter_rust_bridge v2"
+publish = false
+
+[lib]
+# cdylib: Android .so / Linux .so / Windows .dll (cargokit); staticlib: iOS/macOS; rlib: tests.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# MUST match flutter_rust_bridge_codegen and the Dart `flutter_rust_bridge` package exactly.
+flutter_rust_bridge = "=2.13.0"
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_bytes = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["compat"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+sha2 = "0.10"
+hkdf = "0.12"
+url = "2"
+hex = "0.4"
+tracing = "0.1"
+zeroize = "1"
+vodozemac = "0.11"
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
+libp2p = { workspace = true, features = ["tokio", "tcp", "quic", "dns", "noise", "yamux", "mdns", "kad", "identify", "relay", "dcutr", "ping", "request-response", "cbor", "macros", "ed25519"] }
+# Optional embedded-arti Tor transport. Uncomment together with the `tor`
+# feature and the "tor" workspace member once `core/tor/` (umbra-tor) has
+# landed on main. Verified locally against Val's umbra-tor (arti 0.35):
+# builds, clippy-clean on umbra_core, all tests pass.
+# NOTE: arti 0.35 depends on rusqlite 0.37 (libsqlite3-sys 0.35, `links =
+# "sqlite3"`), which is why umbra_core also stays on rusqlite 0.37; bump them
+# together.
+# umbra-tor = { path = "tor", optional = true, features = ["tor"] }
+
+# Mobile / Windows: no system OpenSSL, so build it from source for SQLCipher.
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "windows"))'.dependencies]
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+# Force vendored OpenSSL for SQLCipher on any target (e.g. hermetic Linux CI).
+vendored-openssl = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+# Embedded arti Tor transport (Tor-only swarm). Enable as:
+# tor = ["dep:umbra-tor"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("tor"))', 'cfg(frb_expand)'] }
