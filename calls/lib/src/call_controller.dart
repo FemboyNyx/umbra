@@ -1,9 +1,19 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'call_privacy.dart';
 import 'call_session.dart';
 import 'ice_config.dart';
 import 'signaling.dart';
+
+/// Thrown when the user must acknowledge IP risk or configure TURN first.
+class CallPrivacyException implements Exception {
+  CallPrivacyException(this.code, this.message);
+  final String code;
+  final String message;
+  @override
+  String toString() => 'CallPrivacyException($code): $message';
+}
 
 /// App-facing API for placing and receiving 1:1 calls.
 ///
@@ -14,11 +24,14 @@ class CallController {
     required this.localPeerId,
     required this.transport,
     IceConfig? iceConfig,
-  }) : iceConfig = iceConfig ?? IceConfig();
+    CallPrivacySettings? privacy,
+  })  : iceConfig = iceConfig ?? IceConfig(),
+        privacy = privacy ?? CallPrivacySettings();
 
   final String localPeerId;
   final CallSignalTransport transport;
   IceConfig iceConfig;
+  CallPrivacySettings privacy;
 
   CallSession? active;
   final _incoming = StreamController<CallSession>.broadcast();
@@ -33,11 +46,40 @@ class CallController {
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
+  void _assertMayStartMedia() {
+    if (privacy.shouldShowPreCallWarning) {
+      throw CallPrivacyException(
+        'ack_required',
+        preCallIpWarningShort,
+      );
+    }
+    if (iceConfig.relayOnlyBlocked) {
+      throw CallPrivacyException(
+        'turn_required',
+        'Relay only is on, but no TURN server is configured.',
+      );
+    }
+  }
+
+  /// User confirmed the IP / Tor disclosure (app shows [preCallIpWarning]).
+  void acknowledgeIpRisk() {
+    privacy.acknowledgeIpRisk = true;
+  }
+
+  /// Toggle relay-only (force TURN). Copies policy onto [iceConfig].
+  void setRelayOnly(bool enabled) {
+    privacy.relayPolicy =
+        enabled ? CallRelayPolicy.relayOnly : CallRelayPolicy.allowDirect;
+    iceConfig = iceConfig.withRelayPolicy(privacy.relayPolicy);
+  }
+
   /// Place an outbound call.
   Future<CallSession> startCall({
     required String remotePeerId,
     CallMediaMode mediaMode = CallMediaMode.audioOnly,
+    bool skipPrivacyCheck = false,
   }) async {
+    if (!skipPrivacyCheck) _assertMayStartMedia();
     if (active != null &&
         active!.state != CallSessionState.ended &&
         active!.state != CallSessionState.failed) {
@@ -68,7 +110,6 @@ class CallController {
       if (active != null &&
           active!.state != CallSessionState.ended &&
           active!.state != CallSessionState.failed) {
-        // Busy: auto-reject.
         await transport.send(CallSignalMessage(
           type: CallSignalType.reject,
           callId: msg.callId,
@@ -98,6 +139,12 @@ class CallController {
     final session = active;
     if (session == null || session.callId != msg.callId) return;
     await session.onRemoteSignal(msg);
+  }
+
+  /// Accept an incoming call (runs the same privacy checks as outbound).
+  Future<void> acceptIncoming({bool skipPrivacyCheck = false}) async {
+    if (!skipPrivacyCheck) _assertMayStartMedia();
+    await active?.accept();
   }
 
   /// Replace TURN servers from user settings (never hardcode secrets).
