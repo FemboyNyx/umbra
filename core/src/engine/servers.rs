@@ -117,6 +117,8 @@ pub struct ServerInbound {
     pub data: Vec<u8>,
     pub id: String,
     pub ts: i64,
+    /// Optional envelope fields (seq / prev hash / expiry), as sent.
+    pub meta: crate::engine::proto::EnvelopeMeta,
 }
 
 /// Server ids are unpadded base64url (SHA-256 => 43 chars); accept any

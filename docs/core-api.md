@@ -231,6 +231,50 @@ checked on `add_co_member`, `add_contact`, `Hello` and key claims:
   `remove_co_member` drops them once the peer is in no shared server and
   isn't a contact.
 
+### Generalized outbox and envelope fields (Phase 0)
+
+```rust
+fn queue_server_payload(self: &Arc<Self>, peer_id: &str, server_id: &str, kind: ServerPayloadKind,
+                        data: &[u8], meta: EnvelopeMeta) -> Result<String /* payload id */>;
+struct EnvelopeMeta { seq: Option<u64>, prev: Option<String>, expires_at: Option<i64> }
+```
+
+* The outbox holds **typed items**: `Dm` (the text stays in `messages`, as
+  before) or `Server { server_id, payload }`, where the payload is the full
+  Olm plaintext for one co-member. Both kinds share the same ordering,
+  retries, flush triggers (connect, `Hello`, discovery, the 15 s tick) and the
+  **same 7-day expiry**. An expired DM is still marked `Failed`. An expired
+  server item is dropped without a `MessageStatus` (Phase 1 decides what, if
+  anything, to show).
+* A server item is sent only while the peer is a signed co-member of that
+  server with no pending key change. It is held while a change is pending,
+  and dropped if the peer leaves that server (`remove_co_member`).
+  `remove_contact` drops DM items only. Each row records which of our
+  identities sends it (`local_identity`, always `"default"` in Phase 0).
+* **Reserved envelope fields** (Jal is designing what they mean): every Olm
+  `Payload` may carry, inside the encryption,
+  * `seq`: a per-sender sequence number that only increases, for detecting
+    gaps and deletions;
+  * `prev`: the hash of the sender's previous message in the stream (a hash
+    chain), base64, at most 128 chars;
+  * `expires_at`: expiry requested by the sender, in ms since the epoch, for
+    disappearing messages.
+
+  All three are optional. They are left out of the JSON when unset, so a
+  payload without them is byte-identical to the old format. Older cores
+  ignore them (serde skips unknown fields), and future unknown fields are
+  ignored too. Core stores them with queued items (`outbox.seq / prev_hash /
+  expires_at`) and with received DMs (`messages.seq / prev_hash /
+  expires_at`), and passes them on in `ServerInbound.meta`. **Phase 0 doesn't
+  interpret them**: it doesn't number DMs, check chains, or delete expired
+  messages. A `prev` over 128 chars is `Rejected(Malformed)`. They aren't in
+  the FFI `Message` type yet.
+* Schema v3 (migrated in one transaction, columns added only if missing):
+  `contacts.card_sig / pending_card_sig`, the tables `server_memberships`
+  and `co_members`, `outbox.kind / server_id / payload / seq / prev_hash /
+  expires_at / local_identity`, and `messages.seq / prev_hash / expires_at`.
+  servers.md's Phase 1 tables ("schema v3" there) will be v4.
+
 ## Messaging
 
 ```rust
@@ -333,7 +377,8 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
   `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
   `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch |
   RateLimited | NotAMember)`.
-  Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal | Server}`; `to` must be
+  Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal | Server,
+  seq?, prev?, expires_at?}`; `to` must be
   the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per
   peer, pre-key messages matched by session id.
 * **Server payload carrier (Phase 0)**: `PayloadBody::Server { server_id,

@@ -73,6 +73,11 @@ pub enum KeysResponse {
 }
 
 /// Olm plaintext.
+///
+/// `seq`, `prev` and `expires_at` are optional, reserved envelope fields
+/// (gap / deletion detection and disappearing messages; semantics TBD by
+/// Jal's designs). They are omitted when unset, and older cores ignore them
+/// (serde skips unknown fields), so adding them is wire-compatible both ways.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payload {
     pub v: u8,
@@ -81,6 +86,51 @@ pub struct Payload {
     pub id: String,
     pub ts: i64,
     pub body: PayloadBody,
+    /// Per-sender, monotonically increasing sequence number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// Hash of the sender's previous message in the same stream (hash chain),
+    /// unpadded base64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev: Option<String>,
+    /// Sender-requested expiry, ms since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+/// The optional envelope fields of a [`Payload`], as stored in the outbox
+/// and `messages` and passed through the engine API.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvelopeMeta {
+    pub seq: Option<u64>,
+    pub prev: Option<String>,
+    pub expires_at: Option<i64>,
+}
+
+/// Max length of `Payload.prev` (a hash, base64).
+pub const MAX_PREV_HASH_CHARS: usize = 128;
+
+impl Payload {
+    pub fn new(to: String, id: String, ts: i64, body: PayloadBody, meta: EnvelopeMeta) -> Self {
+        Self {
+            v: 1,
+            to,
+            id,
+            ts,
+            body,
+            seq: meta.seq,
+            prev: meta.prev,
+            expires_at: meta.expires_at,
+        }
+    }
+
+    pub fn meta(&self) -> EnvelopeMeta {
+        EnvelopeMeta {
+            seq: self.seq,
+            prev: self.prev.clone(),
+            expires_at: self.expires_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

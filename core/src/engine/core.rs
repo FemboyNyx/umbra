@@ -20,8 +20,8 @@ use crate::engine::limits::{KeyedBuckets, Limits, TokenBucket};
 use crate::engine::net::{self, NetConfig, NetHandle, TransportMode};
 use crate::engine::proto::*;
 use crate::engine::servers::*;
-use crate::engine::store::{CoMemberRow, ContactRow, MembershipRow, Store};
-use crate::engine::util::{now_ms, unb64};
+use crate::engine::store::{CoMemberRow, ContactRow, MembershipRow, OutboxItem, Store};
+use crate::engine::util::{b64, now_ms, unb64};
 use crate::engine::{qr, safety};
 
 pub const DB_FILE: &str = "umbra.db";
@@ -815,8 +815,8 @@ impl Core {
     ) -> Result<()> {
         let peer = parse_peer(peer_id)?;
         let contact = self
-            .store
-            .get_contact(peer_id)?
+            .pin(peer_id)?
+            .filter(|p| p.contact.is_some())
             .ok_or_else(|| anyhow!("unknown contact {peer_id}"))?;
         if payload.len() > MAX_SIGNAL_BYTES || call_id.len() > 128 {
             bail!("signal too large");
@@ -825,17 +825,17 @@ impl Core {
         let lock = self.peer_lock(peer);
         let fut = async {
             let _g = lock.lock().await;
-            let p = Payload {
-                v: 1,
-                to: peer_id.to_string(),
-                id: uuid::Uuid::new_v4().to_string(),
-                ts: now_ms(),
-                body: PayloadBody::Signal {
+            let p = Payload::new(
+                peer_id.to_string(),
+                uuid::Uuid::new_v4().to_string(),
+                now_ms(),
+                PayloadBody::Signal {
                     call_id,
                     kind,
                     payload,
                 },
-            };
+                EnvelopeMeta::default(),
+            );
             match self.deliver(&net, &contact, &p).await {
                 Ok(()) => Ok(()),
                 Err(DeliverError::NotAContact) => {
@@ -1019,6 +1019,8 @@ impl Core {
                 peer_id: peer.to_base58(),
             });
             self.spawn_flush(peer);
+        } else if self.has_outbox(&peer) {
+            self.spawn_flush(peer); // co-member with queued server payloads
         }
         self.emit_status();
     }
@@ -1046,13 +1048,23 @@ impl Core {
 
     pub(crate) fn on_tick(self: &Arc<Self>) {
         if let Ok(expired) = self.store.outbox_expire(now_ms() - OUTBOX_TTL_MS) {
-            for (id, peer_id) in expired {
-                let _ = self.store.set_message_status(&id, DeliveryStatus::Failed);
-                self.events.emit(CoreEvent::MessageStatus {
-                    id,
-                    peer_id,
-                    status: DeliveryStatus::Failed,
-                });
+            for row in expired {
+                match row.item {
+                    OutboxItem::Dm => {
+                        let _ = self
+                            .store
+                            .set_message_status(&row.msg_id, DeliveryStatus::Failed);
+                        self.events.emit(CoreEvent::MessageStatus {
+                            id: row.msg_id,
+                            peer_id: row.peer_id,
+                            status: DeliveryStatus::Failed,
+                        });
+                    }
+                    // No user-visible message; Phase 1 decides what to surface.
+                    OutboxItem::Server { .. } => {
+                        tracing::debug!("expired an undelivered server payload");
+                    }
+                }
             }
         }
         for p in self.store.outbox_peers().unwrap_or_default() {
@@ -1235,6 +1247,10 @@ impl Core {
             }
             return Ok(MsgResponse::Rejected(RejectReason::NotAContact));
         }
+        let meta = p.meta();
+        if !meta_ok(&meta) {
+            return Ok(MsgResponse::Rejected(RejectReason::Malformed));
+        }
         match p.body {
             PayloadBody::Server {
                 server_id,
@@ -1257,6 +1273,7 @@ impl Core {
                     data,
                     id: p.id,
                     ts: p.ts,
+                    meta,
                 });
             }
             PayloadBody::Text { text } => {
@@ -1272,7 +1289,7 @@ impl Core {
                     status: DeliveryStatus::Received,
                     read: false,
                 };
-                if self.store.insert_message(&m)? {
+                if self.store.insert_message_with_meta(&m, &meta)? {
                     self.events.emit(CoreEvent::MessageReceived { message: m });
                 }
             }
@@ -1386,7 +1403,7 @@ impl Core {
     async fn ensure_session(
         &self,
         net: &NetHandle,
-        contact: &ContactRow,
+        contact: &Pin,
         peer: PeerId,
     ) -> Result<(), DeliverError> {
         if self.crypto.has_session(&contact.peer_id)? {
@@ -1425,7 +1442,7 @@ impl Core {
     async fn deliver(
         &self,
         net: &NetHandle,
-        contact: &ContactRow,
+        contact: &Pin,
         p: &Payload,
     ) -> Result<(), DeliverError> {
         let peer = parse_peer(&contact.peer_id)?;
@@ -1462,9 +1479,9 @@ impl Core {
             return Ok(()); // another flush is running; it will pick up new entries
         };
         let pid = peer.to_base58();
-        let Some(contact) = self.store.get_contact(&pid)? else {
+        if self.pin(&pid)?.is_none() {
             return Ok(());
-        };
+        }
         let net = self.net_handle()?;
         if let Err(e) = self.greet(&net, peer).await {
             return Err(e.context("hello failed"));
@@ -1475,28 +1492,57 @@ impl Core {
                 return Ok(());
             }
             for row in rows {
-                let Some(m) = self.store.get_message(&row.msg_id)? else {
-                    self.store.outbox_remove(&row.msg_id)?;
-                    continue;
+                // Re-read every time: key changes / removals apply mid-flush.
+                let Some(pin) = self.pin(&pid)? else {
+                    return Ok(());
+                };
+                let p = match &row.item {
+                    OutboxItem::Dm => {
+                        let Some(m) = self.store.get_message(&row.msg_id)? else {
+                            self.store.outbox_remove(&row.msg_id)?;
+                            continue;
+                        };
+                        if pin.contact.is_none() {
+                            continue; // only contacts get DMs
+                        }
+                        Payload::new(
+                            pid.clone(),
+                            m.id,
+                            m.timestamp_ms,
+                            PayloadBody::Text { text: m.body },
+                            row.meta.clone(),
+                        )
+                    }
+                    OutboxItem::Server { server_id, payload } => {
+                        if !pin.rows.iter().any(|r| &r.server_id == server_id) {
+                            self.store.outbox_remove(&row.msg_id)?; // no longer shared
+                            continue;
+                        }
+                        if !pin.server_ok(server_id) {
+                            return Ok(()); // key change pending: hold until resolved
+                        }
+                        match serde_json::from_slice::<Payload>(payload) {
+                            Ok(p) => p,
+                            Err(_) => {
+                                self.store.outbox_remove(&row.msg_id)?;
+                                continue;
+                            }
+                        }
+                    }
                 };
                 self.store.outbox_attempt(&row.msg_id, now_ms())?;
-                let p = Payload {
-                    v: 1,
-                    to: pid.clone(),
-                    id: m.id.clone(),
-                    ts: m.timestamp_ms,
-                    body: PayloadBody::Text { text: m.body },
-                };
-                match self.deliver(&net, &contact, &p).await {
+                match self.deliver(&net, &pin, &p).await {
                     Ok(()) => {
-                        self.store.outbox_remove(&m.id)?;
-                        self.store
-                            .set_message_status(&m.id, DeliveryStatus::Delivered)?;
-                        self.events.emit(CoreEvent::MessageStatus {
-                            id: m.id,
-                            peer_id: pid.clone(),
-                            status: DeliveryStatus::Delivered,
-                        });
+                        self.store.outbox_remove(&row.msg_id)?;
+                        if row.item == OutboxItem::Dm {
+                            self.store
+                                .set_message_status(&row.msg_id, DeliveryStatus::Delivered)?;
+                            self.events.emit(CoreEvent::MessageStatus {
+                                id: row.msg_id,
+                                peer_id: pid.clone(),
+                                status: DeliveryStatus::Delivered,
+                            });
+                        }
                     }
                     Err(DeliverError::NotAContact) => return Ok(()),
                     Err(DeliverError::Retry(e)) => return Err(e),
@@ -1504,6 +1550,70 @@ impl Core {
             }
         }
     }
+
+    /// Queue a server-scoped payload for co-member `peer_id` of `server_id`.
+    /// Same outbox, ordering, retries and 7-day expiry as DMs; sent from the
+    /// identity the membership uses. `meta` sets the optional envelope
+    /// fields. Returns the payload id.
+    pub fn queue_server_payload(
+        self: &Arc<Self>,
+        peer_id: &str,
+        server_id: &str,
+        kind: ServerPayloadKind,
+        data: &[u8],
+        meta: EnvelopeMeta,
+    ) -> Result<String> {
+        let peer = parse_peer(peer_id)?;
+        let membership = self
+            .server_membership(server_id)?
+            .ok_or_else(|| anyhow!("not a member of {server_id}"))?;
+        let pin = self
+            .pin(peer_id)?
+            .filter(|p| p.rows.iter().any(|r| r.server_id == server_id))
+            .ok_or_else(|| anyhow!("{peer_id} is not a co-member of {server_id}"))?;
+        if !pin.server_ok(server_id) {
+            bail!("key change pending or unsigned card for {peer_id}; resolve it first");
+        }
+        if data.len() > MAX_SERVER_PAYLOAD_BYTES {
+            bail!("server payload too large (max {MAX_SERVER_PAYLOAD_BYTES} bytes)");
+        }
+        if !meta_ok(&meta) {
+            bail!("invalid envelope fields");
+        }
+        let now = now_ms();
+        let p = Payload::new(
+            peer_id.to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            now,
+            PayloadBody::Server {
+                server_id: server_id.to_string(),
+                kind,
+                data: b64(data),
+            },
+            meta.clone(),
+        );
+        self.store.outbox_add_item(
+            &p.id,
+            peer_id,
+            now,
+            &OutboxItem::Server {
+                server_id: server_id.to_string(),
+                payload: serde_json::to_vec(&p)?,
+            },
+            &meta,
+            membership.identity.as_str(),
+        )?;
+        self.spawn_flush(peer);
+        Ok(p.id)
+    }
+}
+
+/// Sanity limits on the optional envelope fields.
+fn meta_ok(m: &EnvelopeMeta) -> bool {
+    m.prev
+        .as_ref()
+        .is_none_or(|p| p.len() <= MAX_PREV_HASH_CHARS)
+        && m.seq.is_none_or(|s| s <= i64::MAX as u64)
 }
 
 /// The card we hold for a co-member (for a `ContactRequest`).
@@ -1522,7 +1632,6 @@ fn co_member_card(r: &CoMemberRow) -> ContactCard {
 mod tests {
     use super::*;
     use crate::engine::limits::*;
-    use crate::engine::util::b64;
 
     pub(crate) fn open(
         key: u8,
@@ -1599,6 +1708,10 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             ts: now_ms(),
             body: PayloadBody::Text { text: text.into() },
+
+            seq: None,
+            prev: None,
+            expires_at: None,
         };
         let (t, c) = from
             .crypto
@@ -1711,6 +1824,10 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             ts: now_ms(),
             body,
+
+            seq: None,
+            prev: None,
+            expires_at: None,
         };
         let (t, c) = from
             .crypto
@@ -1940,6 +2057,184 @@ mod tests {
         assert!(!a.co_member("srv1", &pbs).unwrap().unwrap().is_contact);
     }
 
+    #[test]
+    fn envelope_fields_are_optional_and_forward_compatible() {
+        let body = || PayloadBody::Text { text: "t".into() };
+        // Unset: omitted from the wire (byte-identical to the old format).
+        let plain = Payload::new("p".into(), "i".into(), 1, body(), EnvelopeMeta::default());
+        let j = serde_json::to_string(&plain).unwrap();
+        assert!(!j.contains("seq") && !j.contains("prev") && !j.contains("expires_at"));
+        // Set: round-trips.
+        let meta = EnvelopeMeta {
+            seq: Some(u32::MAX as u64 + 1),
+            prev: Some("aGFzaA".into()),
+            expires_at: Some(123),
+        };
+        let full = Payload::new("p".into(), "i".into(), 1, body(), meta.clone());
+        let j = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<Payload>(&j).unwrap().meta(), meta);
+        // An older core's Payload (no such fields) still decodes it.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OldPayload {
+            v: u8,
+            to: String,
+            id: String,
+            ts: i64,
+            body: PayloadBody,
+        }
+        serde_json::from_str::<OldPayload>(&j).unwrap();
+        // Old JSON (absent fields) and future unknown fields decode here.
+        let old = r#"{"v":1,"to":"p","id":"i","ts":1,"body":{"Text":{"text":"t"}}}"#;
+        assert_eq!(
+            serde_json::from_str::<Payload>(old).unwrap().meta(),
+            EnvelopeMeta::default()
+        );
+        let future = r#"{"v":1,"to":"p","id":"i","ts":1,"body":{"Text":{"text":"t"}},"seq":3,"new_field":{"x":1}}"#;
+        assert_eq!(
+            serde_json::from_str::<Payload>(future).unwrap().seq,
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_envelope_fields_are_stored_and_passed_on() {
+        let (a, _ra, _da) = open(1);
+        let (b, _rb, _db) = open(2);
+        befriend(&a, &b).await;
+        assert!(matches!(open_session(&a, &b), KeysResponse::Key { .. }));
+        let meta = EnvelopeMeta {
+            seq: Some(42),
+            prev: Some("cHJldg".into()),
+            expires_at: Some(9_999),
+        };
+        let pts = a.peer_id().to_base58();
+        let p = Payload::new(
+            pts.clone(),
+            "m1".into(),
+            now_ms(),
+            PayloadBody::Text { text: "hi".into() },
+            meta.clone(),
+        );
+        let (t, c) = b
+            .crypto
+            .encrypt(&pts, &serde_json::to_vec(&p).unwrap())
+            .unwrap();
+        assert_eq!(
+            a.handle_msg(b.peer_id(), MsgRequest::Olm { t, c }),
+            MsgResponse::Delivered
+        );
+        assert_eq!(a.store.message_meta("m1").unwrap(), Some(meta.clone()));
+
+        // Oversized prev hash is refused.
+        let bad = Payload::new(
+            pts.clone(),
+            "m2".into(),
+            now_ms(),
+            PayloadBody::Text { text: "hi".into() },
+            EnvelopeMeta {
+                prev: Some("x".repeat(MAX_PREV_HASH_CHARS + 1)),
+                ..meta
+            },
+        );
+        let (t, c) = b
+            .crypto
+            .encrypt(&pts, &serde_json::to_vec(&bad).unwrap())
+            .unwrap();
+        assert_eq!(
+            a.handle_msg(b.peer_id(), MsgRequest::Olm { t, c }),
+            MsgResponse::Rejected(RejectReason::Malformed)
+        );
+    }
+
+    #[tokio::test]
+    async fn outbox_queues_typed_server_payloads() {
+        let (a, mut rx, _da) = open(1);
+        let (b, _rb, _db) = open(2);
+        let pbs = b.peer_id().to_base58();
+        a.add_server_membership("srv1", ServerIdentity::Default, None)
+            .unwrap();
+        a.add_server_membership("srv2", ServerIdentity::Default, None)
+            .unwrap();
+        let q = |srv: &str| {
+            a.queue_server_payload(
+                &pbs,
+                srv,
+                ServerPayloadKind::ServerOp,
+                b"op",
+                EnvelopeMeta::default(),
+            )
+        };
+        // Only to co-members of that server.
+        assert!(q("srv1").is_err());
+        a.add_co_member("srv1", b.self_card()).unwrap();
+        assert!(q("srv2").is_err());
+        let big = vec![0u8; MAX_SERVER_PAYLOAD_BYTES + 1];
+        assert!(a
+            .queue_server_payload(
+                &pbs,
+                "srv1",
+                ServerPayloadKind::ServerOp,
+                &big,
+                EnvelopeMeta::default()
+            )
+            .is_err());
+        let meta = EnvelopeMeta {
+            seq: Some(1),
+            prev: None,
+            expires_at: Some(5),
+        };
+        let id = a
+            .queue_server_payload(
+                &pbs,
+                "srv1",
+                ServerPayloadKind::ServerKey,
+                b"k",
+                meta.clone(),
+            )
+            .unwrap();
+        let rows = a.store.outbox_for(&pbs).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].msg_id, id);
+        assert_eq!(rows[0].meta, meta);
+        assert_eq!(rows[0].local_identity, "default");
+        let OutboxItem::Server { server_id, payload } = &rows[0].item else {
+            panic!("not a server row")
+        };
+        assert_eq!(server_id, "srv1");
+        let p: Payload = serde_json::from_slice(payload).unwrap();
+        assert_eq!((p.id.as_str(), p.meta()), (id.as_str(), meta));
+        assert!(matches!(
+            p.body,
+            PayloadBody::Server {
+                kind: ServerPayloadKind::ServerKey,
+                ..
+            }
+        ));
+
+        // Pending key change: queueing refused, row held.
+        assert!(a.add_co_member("srv2", rotated_card(&b)).is_err());
+        assert!(q("srv1").is_err());
+        a.reject_key_change(&pbs).unwrap();
+
+        // Same 7-day expiry as DMs, but no DM status event for server rows.
+        drain(&mut rx);
+        a.store
+            .conn_for_test()
+            .execute("UPDATE outbox SET created_at = 0", [])
+            .unwrap();
+        a.on_tick();
+        assert!(a.store.outbox_for(&pbs).unwrap().is_empty());
+        assert!(!drain(&mut rx)
+            .iter()
+            .any(|e| matches!(e, CoreEvent::MessageStatus { .. })));
+
+        // Removing the co-member drops its queued server payloads.
+        q("srv1").unwrap();
+        a.remove_co_member("srv1", &pbs).unwrap();
+        assert!(a.store.outbox_for(&pbs).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn accept_and_busy_signals_round_trip() {
         // Wire names must match calls/lib/src/signaling.dart.
@@ -1967,6 +2262,10 @@ mod tests {
                     kind,
                     payload: "busy".into(),
                 },
+
+                seq: None,
+                prev: None,
+                expires_at: None,
             };
             let (t, c) = b
                 .crypto

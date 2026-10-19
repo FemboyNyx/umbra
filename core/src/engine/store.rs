@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
 use crate::api::types::{Contact, ConversationSummary, DeliveryStatus, Message};
+use crate::engine::proto::EnvelopeMeta;
 
 const SCHEMA_VERSION: i64 = 3;
 
@@ -92,12 +93,53 @@ pub struct SessionRow {
     pub pickle: String,
 }
 
+/// What an outbox row carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboxItem {
+    /// A DM: the text lives in `messages` (`msg_id`).
+    Dm,
+    /// A server-scoped payload: `payload` is the full Olm plaintext
+    /// (`Payload` JSON) for co-member `peer_id`.
+    Server { server_id: String, payload: Vec<u8> },
+}
+
 #[derive(Debug, Clone)]
 pub struct OutboxRow {
     pub msg_id: String,
     pub peer_id: String,
     pub created_at: i64,
     pub attempts: i64,
+    pub item: OutboxItem,
+    pub meta: EnvelopeMeta,
+    /// Which of our identities sends it (`"default"`; see `ServerIdentity`).
+    pub local_identity: String,
+}
+
+const OUTBOX_COLS: &str =
+    "msg_id, peer_id, created_at, attempts, kind, server_id, payload, seq, prev_hash, expires_at, local_identity";
+
+fn row_to_outbox(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxRow> {
+    let kind: String = r.get(4)?;
+    let item = match kind.as_str() {
+        "server" => OutboxItem::Server {
+            server_id: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            payload: r.get::<_, Option<Vec<u8>>>(6)?.unwrap_or_default(),
+        },
+        _ => OutboxItem::Dm,
+    };
+    Ok(OutboxRow {
+        msg_id: r.get(0)?,
+        peer_id: r.get(1)?,
+        created_at: r.get(2)?,
+        attempts: r.get(3)?,
+        item,
+        meta: EnvelopeMeta {
+            seq: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+            prev: r.get(8)?,
+            expires_at: r.get(9)?,
+        },
+        local_identity: r.get(10)?,
+    })
 }
 
 fn status_to_i(s: DeliveryStatus) -> i64 {
@@ -280,7 +322,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn conn_for_test(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn conn_for_test(&self) -> MutexGuard<'_, Connection> {
         self.c()
     }
 
@@ -457,7 +499,10 @@ impl Store {
             tx.execute("DELETE FROM olm_sessions WHERE peer_id = ?1", [peer_id])?;
         }
         tx.execute("DELETE FROM messages WHERE peer_id = ?1", [peer_id])?;
-        tx.execute("DELETE FROM outbox WHERE peer_id = ?1", [peer_id])?;
+        tx.execute(
+            "DELETE FROM outbox WHERE peer_id = ?1 AND kind = 'dm'",
+            [peer_id],
+        )?;
         tx.commit()?;
         if n == 0 {
             bail!("unknown contact {peer_id}");
@@ -541,12 +586,20 @@ impl Store {
         Ok(rows)
     }
 
-    /// Returns false if there was no such record.
+    /// Remove a co-member record and its queued server payloads for that
+    /// server. Returns false if there was no such record.
     pub fn remove_co_member(&self, server_id: &str, peer_id: &str) -> Result<bool> {
-        let n = self.c().execute(
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let n = tx.execute(
             "DELETE FROM co_members WHERE server_id = ?1 AND peer_id = ?2",
             params![server_id, peer_id],
         )?;
+        tx.execute(
+            "DELETE FROM outbox WHERE kind = 'server' AND server_id = ?1 AND peer_id = ?2",
+            params![server_id, peer_id],
+        )?;
+        tx.commit()?;
         Ok(n > 0)
     }
 
@@ -642,11 +695,46 @@ impl Store {
 
     /// Returns false if a message with this id already existed (dedupe).
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
+        self.insert_message_with_meta(m, &EnvelopeMeta::default())
+    }
+
+    /// [`Self::insert_message`] storing the optional envelope fields too.
+    pub fn insert_message_with_meta(&self, m: &Message, meta: &EnvelopeMeta) -> Result<bool> {
         let n = self.c().execute(
-            "INSERT OR IGNORE INTO messages(id, peer_id, outgoing, body, ts, status, read) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![m.id, m.peer_id, m.outgoing as i64, m.body, m.timestamp_ms, status_to_i(m.status), m.read as i64],
+            "INSERT OR IGNORE INTO messages(id, peer_id, outgoing, body, ts, status, read, seq, prev_hash, expires_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                m.id,
+                m.peer_id,
+                m.outgoing as i64,
+                m.body,
+                m.timestamp_ms,
+                status_to_i(m.status),
+                m.read as i64,
+                meta.seq.map(|v| v as i64),
+                meta.prev,
+                meta.expires_at
+            ],
         )?;
         Ok(n == 1)
+    }
+
+    /// The optional envelope fields stored with a message.
+    pub fn message_meta(&self, id: &str) -> Result<Option<EnvelopeMeta>> {
+        Ok(self
+            .c()
+            .query_row(
+                "SELECT seq, prev_hash, expires_at FROM messages WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(EnvelopeMeta {
+                        seq: r.get::<_, Option<i64>>(0)?.map(|v| v as u64),
+                        prev: r.get(1)?,
+                        expires_at: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn get_message(&self, id: &str) -> Result<Option<Message>> {
@@ -734,28 +822,60 @@ impl Store {
 
     // ---- outbox ----
 
+    /// Queue a DM (text in `messages`).
     pub fn outbox_add(&self, msg_id: &str, peer_id: &str, now: i64) -> Result<()> {
+        self.outbox_add_item(
+            msg_id,
+            peer_id,
+            now,
+            &OutboxItem::Dm,
+            &EnvelopeMeta::default(),
+            "default",
+        )
+    }
+
+    /// Queue any item. Ids are unique across kinds; a duplicate is ignored.
+    pub fn outbox_add_item(
+        &self,
+        msg_id: &str,
+        peer_id: &str,
+        now: i64,
+        item: &OutboxItem,
+        meta: &EnvelopeMeta,
+        local_identity: &str,
+    ) -> Result<()> {
+        let (kind, server_id, payload) = match item {
+            OutboxItem::Dm => ("dm", None, None),
+            OutboxItem::Server { server_id, payload } => {
+                ("server", Some(server_id.as_str()), Some(payload.as_slice()))
+            }
+        };
         self.c().execute(
-            "INSERT OR IGNORE INTO outbox(msg_id, peer_id, created_at) VALUES (?1, ?2, ?3)",
-            params![msg_id, peer_id, now],
+            "INSERT OR IGNORE INTO outbox(msg_id, peer_id, created_at, kind, server_id, payload, seq, prev_hash, expires_at, local_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                msg_id,
+                peer_id,
+                now,
+                kind,
+                server_id,
+                payload,
+                meta.seq.map(|v| v as i64),
+                meta.prev,
+                meta.expires_at,
+                local_identity
+            ],
         )?;
         Ok(())
     }
 
     pub fn outbox_for(&self, peer_id: &str) -> Result<Vec<OutboxRow>> {
         let c = self.c();
-        let mut st = c.prepare(
-            "SELECT msg_id, peer_id, created_at, attempts FROM outbox WHERE peer_id = ?1 ORDER BY created_at, rowid",
-        )?;
+        let mut st = c.prepare(&format!(
+            "SELECT {OUTBOX_COLS} FROM outbox WHERE peer_id = ?1 ORDER BY created_at, rowid"
+        ))?;
         let rows = st
-            .query_map([peer_id], |r| {
-                Ok(OutboxRow {
-                    msg_id: r.get(0)?,
-                    peer_id: r.get(1)?,
-                    created_at: r.get(2)?,
-                    attempts: r.get(3)?,
-                })
-            })?
+            .query_map([peer_id], row_to_outbox)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -783,15 +903,17 @@ impl Store {
         Ok(())
     }
 
-    /// Remove and return ids of entries created before `cutoff`.
-    pub fn outbox_expire(&self, cutoff: i64) -> Result<Vec<(String, String)>> {
+    /// Remove and return entries created before `cutoff` (all kinds).
+    pub fn outbox_expire(&self, cutoff: i64) -> Result<Vec<OutboxRow>> {
         let mut c = self.c();
         let tx = c.transaction()?;
         let rows = {
-            let mut st = tx.prepare("SELECT msg_id, peer_id FROM outbox WHERE created_at < ?1")?;
+            let mut st = tx.prepare(&format!(
+                "SELECT {OUTBOX_COLS} FROM outbox WHERE created_at < ?1"
+            ))?;
             let rows = st
-                .query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+                .query_map([cutoff], row_to_outbox)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
         tx.execute("DELETE FROM outbox WHERE created_at < ?1", [cutoff])?;
@@ -816,6 +938,27 @@ const ADDED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "contacts",
         &[("card_sig", "TEXT"), ("pending_card_sig", "TEXT")],
+    ),
+    // v3: generalized outbox (typed items) + reserved envelope fields.
+    (
+        "outbox",
+        &[
+            ("kind", "TEXT NOT NULL DEFAULT 'dm'"),
+            ("server_id", "TEXT"),
+            ("payload", "BLOB"),
+            ("seq", "INTEGER"),
+            ("prev_hash", "TEXT"),
+            ("expires_at", "INTEGER"),
+            ("local_identity", "TEXT NOT NULL DEFAULT 'default'"),
+        ],
+    ),
+    (
+        "messages",
+        &[
+            ("seq", "INTEGER"),
+            ("prev_hash", "TEXT"),
+            ("expires_at", "INTEGER"),
+        ],
     ),
 ];
 
@@ -1009,6 +1152,22 @@ mod tests {
             v
         };
         let s = Store::open(&path, &KEY).expect("half-migrated db opens");
+        for (table, col) in [
+            ("outbox", "kind"),
+            ("outbox", "local_identity"),
+            ("messages", "expires_at"),
+            ("contacts", "card_sig"),
+        ] {
+            let n: i64 = s
+                .conn_for_test()
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    [table, col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table}.{col}");
+        }
         assert_eq!(
             s.meta_get_i64("schema_version").unwrap(),
             Some(SCHEMA_VERSION)
@@ -1059,6 +1218,39 @@ mod tests {
         conn.execute_batch("DROP TRIGGER fail_bump;").unwrap();
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
+    }
+
+    #[test]
+    fn outbox_rows_are_typed_and_scoped() {
+        let s = Store::open_in_memory(&KEY).unwrap();
+        s.upsert_contact(&contact("p1")).unwrap();
+        s.outbox_add("dm1", "p1", 1).unwrap();
+        let meta = EnvelopeMeta {
+            seq: Some(9),
+            prev: Some("h".into()),
+            expires_at: Some(10),
+        };
+        let item = OutboxItem::Server {
+            server_id: "srv".into(),
+            payload: b"{}".to_vec(),
+        };
+        s.outbox_add_item("sv1", "p1", 2, &item, &meta, "default")
+            .unwrap();
+        let rows = s.outbox_for("p1").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0].item.clone(), rows[0].meta.clone()),
+            (OutboxItem::Dm, EnvelopeMeta::default())
+        );
+        assert_eq!((rows[1].item.clone(), rows[1].meta.clone()), (item, meta));
+        // Removing the contact drops DM rows only.
+        s.remove_contact("p1", true).unwrap();
+        let rows = s.outbox_for("p1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].msg_id, "sv1");
+        // Expiry covers every kind.
+        assert_eq!(s.outbox_expire(3).unwrap().len(), 1);
+        assert!(s.outbox_for("p1").unwrap().is_empty());
     }
 
     #[test]

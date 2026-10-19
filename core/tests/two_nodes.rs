@@ -211,6 +211,51 @@ async fn two_nodes_chat_and_signal() {
     b.core.stop_network().await.unwrap();
 }
 
+/// Servers Phase 0: two co-members who are NOT contacts exchange a queued
+/// server payload over the real network (Hello, key claim, Olm, outbox),
+/// with the optional envelope fields intact.
+#[cfg(not(feature = "tor"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn co_members_deliver_server_payloads_via_outbox() {
+    use umbra_core::engine::proto::EnvelopeMeta;
+    use umbra_core::engine::servers::{ServerIdentity, ServerPayloadKind};
+    init_tracing();
+    let a = node(1, "Alice").await;
+    let b = node(2, "Bob").await;
+    let mut inbound = b.core.subscribe_server();
+    for n in [&a, &b] {
+        n.core
+            .add_server_membership("srv1", ServerIdentity::Default, None)
+            .unwrap();
+    }
+    let card = |n: &Node| umbra_core::engine::qr::parse_qr(&n.core.self_info().qr_payload).unwrap();
+    a.core.add_co_member("srv1", card(&b)).unwrap();
+    b.core.add_co_member("srv1", card(&a)).unwrap();
+    let meta = EnvelopeMeta {
+        seq: Some(7),
+        prev: Some("cHJldg".into()),
+        expires_at: Some(4_102_444_800_000),
+    };
+    let id = a
+        .core
+        .queue_server_payload(
+            &b.core.peer_id().to_base58(),
+            "srv1",
+            ServerPayloadKind::ServerKey,
+            b"session-key",
+            meta.clone(),
+        )
+        .unwrap();
+    let got = timeout(T, inbound.recv()).await.unwrap().unwrap();
+    assert_eq!(got.id, id);
+    assert_eq!(got.peer_id, a.core.peer_id().to_base58());
+    assert_eq!(got.kind, ServerPayloadKind::ServerKey);
+    assert_eq!(got.data, b"session-key");
+    assert_eq!(got.meta, meta);
+    assert!(a.core.list_contacts().unwrap().is_empty());
+    assert!(b.core.list_contacts().unwrap().is_empty());
+}
+
 #[cfg(not(feature = "tor"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outbox_survives_offline_peer() {
