@@ -131,6 +131,10 @@ pub struct ConversationSummary {
 }
 
 /// Call signaling message kinds, carried encrypted by core for `calls/`.
+///
+/// Wire names are the variant names (`"Offer"`, …, `"Accept"`, `"Busy"`) and
+/// must match `calls/lib/src/signaling.dart` (`SignalKindWire.wire`).
+/// New variants go at the end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SignalKind {
     Offer,
@@ -139,6 +143,10 @@ pub enum SignalKind {
     Hangup,
     Ringing,
     Reject,
+    /// Callee accepted a `Ringing`; the caller sends `Offer` next.
+    Accept,
+    /// Callee is already in a call.
+    Busy,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

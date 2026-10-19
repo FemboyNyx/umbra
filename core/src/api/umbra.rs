@@ -294,13 +294,21 @@ mod tests {
             .block_on(send_signal(
                 c.peer_id.clone(),
                 "call1".into(),
+                SignalKind::Ringing,
+                String::new(),
+            ))
+            .unwrap();
+        RUNTIME
+            .block_on(send_signal(
+                c.peer_id.clone(),
+                "call1".into(),
                 SignalKind::Offer,
                 "sdp".into(),
             ))
             .unwrap();
-        let (mut delivered, mut echo, mut answer) = (false, false, false);
+        let (mut delivered, mut echo, mut answer, mut accept) = (false, false, false, false);
         RUNTIME.block_on(async {
-            while !(delivered && echo && answer) {
+            while !(delivered && echo && answer && accept) {
                 match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
                     .await
                     .unwrap()
@@ -318,6 +326,10 @@ mod tests {
                         kind: SignalKind::Answer,
                         ..
                     } => answer = true,
+                    CoreEvent::Signal {
+                        kind: SignalKind::Accept,
+                        ..
+                    } => accept = true,
                     _ => {}
                 }
             }
