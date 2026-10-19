@@ -24,9 +24,9 @@ runs on the same ref.
 | Job | When it runs | What it does | Artifacts |
 |-----|--------------|--------------|-----------|
 | `detect` | always | Sets `has_core` / `has_app` from `core/Cargo.toml` and `app/pubspec.yaml` | — |
-| `rust-core` | `has_core == true` | `cargo fmt --check`, `clippy -D warnings`, `cargo test --all-features` in `core/` (stable toolchain + Swatinem/rust-cache) | — |
-| `flutter-analyze` | `has_app == true` | `flutter pub get`, `analyze`, `test` in `app/` | — |
-| `build-android` | `has_app == true` | Java 17, NDK r26d + optional Android Rust targets (see below), configure signing (or debug fallback), `flutter build apk`, upload APK(s) | `umbra-android-apk` |
+| `rust-core` | `has_core == true` | Rust **1.89** via rustup, then `cargo fmt --check`, `cargo clippy --locked …`, `cargo test --locked --all-features` in `core/` (+ Swatinem/rust-cache) | — |
+| `flutter-analyze` | `has_app == true` | `flutter pub get`, enforce `flutter_rust_bridge` `=2.13.0` when present in pubspec, then `analyze` / `test` | — |
+| `build-android` | `has_app == true` | Java 17, NDK r26d, optional Android Rust 1.89 targets, `perl`+`make` (SQLCipher/OpenSSL), signing or debug fallback, `flutter build apk` | `umbra-android-apk` |
 | `build-windows` | `has_app == true` | `flutter build windows --release`, then `packaging/windows/build-zip.ps1`; optional MSIX when cert secrets + `msix` in pubspec | `umbra-windows` (`dist/*.zip`, optional `dist/*.msix`) |
 | `build-linux` | `has_app == true` | GTK/clang/ninja + fuse deps, install `appimagetool`, `flutter build linux --release`, then `packaging/linux/build-tarball.sh` and `build-appimage.sh` | `umbra-linux` (`dist/*.tar.gz`, `dist/*.AppImage`) |
 | `ci-gate` | always | Fails the workflow if any non-skipped package job failed; skipped jobs (missing `core/` or `app/`) are OK | — |
@@ -45,7 +45,24 @@ failed, and `ci-gate` still passes.
   `Umbra-abc1234-x86_64.AppImage`, `umbra-abc1234-windows-x64.zip` (CI writes the
   zip as `dist/umbra-windows-x64.zip` but passes the short SHA as `-Version`).
 
-**Android NDK and Rust targets (FRB / cargokit)**
+**Rust toolchain (1.89+)**
+
+`vodozemac` 0.11 needs **Rust 1.89 or newer**. That floor is pinned in
+`core/rust-toolchain.toml` (so local `cargo`/`rustc` via rustup pick it up) and
+CI/Release install the same channel explicitly with
+`dtolnay/rust-toolchain@master` and `toolchain: "1.89"` — honoring that pin.
+Always use **rustup**-managed toolchains, never the runner's or distro system
+`rustc` (often far too old).
+
+**Cargo workspace and `--locked`**
+
+`core/` is a Cargo **workspace**. `core/Cargo.lock` is **committed**. The
+`rust-core` job (and Release's rust tests) run cargo with **`--locked`**
+(`cargo clippy --locked …`, `cargo test --locked …`), so the lockfile must
+match the manifests. After `cargo update` (or any dependency change that
+rewrites the lockfile), **commit `Cargo.lock`** or CI will fail.
+
+**Android NDK, Rust targets, and SQLCipher deps (FRB / cargokit)**
 
 Both `ci.yml` and `release.yml` prepare `build-android` the same way (after
 Java 17, before Flutter):
@@ -55,21 +72,28 @@ Java 17, before Flutter):
    `ANDROID_NDK_ROOT` from `steps.setup-ndk.outputs.ndk-path` into `$GITHUB_ENV`
    so cargokit can find the NDK.
 2. **Rust for Android** — only when `has_core == true`:
-   - `dtolnay/rust-toolchain@stable` (rustup-managed stable, not the image's
-     system `rustc`)
+   - `dtolnay/rust-toolchain@master` with `toolchain: "1.89"`
    - `Swatinem/rust-cache@v2` with `workspaces: core`
    - `rustup target add` for `aarch64-linux-android`, `armv7-linux-androideabi`,
      `x86_64-linux-android`, and `i686-linux-android`
+3. **`perl` and `make`** — always installed (`sudo apt-get install -y perl make`).
+   SQLCipher builds OpenSSL as part of the native stack and needs both.
 
-The host `rust-core` job likewise installs tooling through
-`dtolnay/rust-toolchain@stable`.
+The host `rust-core` job installs the same **1.89** toolchain (with `rustfmt`
+and `clippy` on CI) through `dtolnay/rust-toolchain@master`.
 
-**Rust version**
+**flutter_rust_bridge pin (=2.13.0)**
 
-Current libp2p (and related crates) need a recent compiler. Use **Rust 1.88 or
-newer**. CI must install via **rustup stable** (`dtolnay/rust-toolchain@stable`),
-not the distro/`apt` `rustc` on the runner — the system package is often too
-old for this stack.
+Workflows set `FRB_VERSION: "2.13.0"`. In `ci.yml`, the `flutter-analyze` job
+runs a **Check flutter_rust_bridge pin (=2.13.0)** step after `flutter pub get`:
+
+- If `flutter_rust_bridge` is **absent** from `app/pubspec.yaml`, the check
+  skips cleanly.
+- If it is present, the line must match `flutter_rust_bridge:` with version
+  `=2.13.0` (optional `=` before the version). Anything else fails the job.
+
+Keep the Dart package, codegen, and Rust FRB crates on that exact version
+(Elite's pin).
 
 **Pending / not wired yet**
 
@@ -92,8 +116,8 @@ old for this stack.
 | Job | When | What |
 |-----|------|------|
 | `detect` | always | Same `has_core` / `has_app` detection as CI |
-| `rust-core` | `has_core` | `cargo test --all-features` (no fmt/clippy on the release path) |
-| `build-android` | `has_app` | Same NDK / Rust-target / signing + APK build as CI; artifact `umbra-android-apk` |
+| `rust-core` | `has_core` | Rust **1.89**, then `cargo test --locked --all-features` (no fmt/clippy on the release path) |
+| `build-android` | `has_app` | Same NDK / Rust 1.89 targets / perl+make / signing + APK build as CI; artifact `umbra-android-apk` |
 | `build-windows` | `has_app` | Same `build-zip.ps1` + optional MSIX as CI; version from tag (`v0.1.0` → `0.1.0`); artifact `umbra-windows` |
 | `build-linux` | `has_app` | Same `appimagetool` + `build-tarball.sh` / `build-appimage.sh` as CI; version from tag with leading `v` stripped; artifact `umbra-linux` |
 | `publish` | after builds (always, if detect succeeded) | Download artifacts, flatten into `release-assets/`, write `SHA256SUMS`, create GitHub Release via `softprops/action-gh-release@v2` |
@@ -276,7 +300,10 @@ Optional env for the shell scripts: `UMBRA_VERSION`, `DEST_DIR`, `APPIMAGETOOL`,
 | Android APK is debug / won't install as update over release | Signing secrets missing or `key.properties` not consumed by Gradle | Set all four `ANDROID_*` secrets; confirm Copilot applied the signing snippet |
 | `key.properties` / `.jks` shows up in `git status` | Accidental local signing files | They are gitignored; delete or move them out of the tree — never commit |
 | Android native / cargokit build fails looking for NDK | `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` not set or wrong NDK | Confirm `nttld/setup-ndk` ran with `r26d` and the export step; local builds should point those env vars at an r26d install |
-| `cargo` / FRB fails with edition or libp2p compile errors on CI | Toolchain older than 1.88, or system `rustc` used instead of rustup | Workflows use `dtolnay/rust-toolchain@stable`; locally run `rustup update stable` and ensure `rustc` is from rustup (`which rustc`) |
+| `cargo` / FRB fails with edition or vodozemac/libp2p compile errors on CI | Toolchain older than **1.89**, or system `rustc` used instead of rustup | CI installs `toolchain: "1.89"` via `dtolnay/rust-toolchain@master`; locally honor `core/rust-toolchain.toml` and ensure `rustc` is from rustup (`which rustc`) |
+| `cargo … --locked` fails (lock file out of date / missing) | `core/Cargo.lock` not committed or not updated after dependency edits | Run `cargo update` (or regenerate the lock) in `core/`, commit `Cargo.lock`, re-push |
+| Android / cargokit build fails compiling OpenSSL / SQLCipher | Missing `perl` or `make` on the builder | CI installs both; locally `sudo apt-get install -y perl make` (or equivalent) |
+| `flutter-analyze` fails on flutter_rust_bridge pin | pubspec has FRB but not `=2.13.0` | Pin `flutter_rust_bridge: =2.13.0` in `app/pubspec.yaml` (or remove the dep until ready) |
 | Linux Flutter build fails on missing GTK / clang | Dep install step failed | Job must be `ubuntu-latest` with the `apt-get` deps from the workflow (including `fuse` / `libfuse2` for AppImage) |
 | AppImage step fails on `appimagetool` | Download/install step failed or FUSE unavailable | Check the "Install appimagetool" log; confirm `fuse`/`libfuse2` installed |
 | Windows zip empty / upload error | `flutter build windows` failed or `build-zip.ps1` path wrong | Confirm `app/build/windows/x64/runner/Release` exists; packaging scripts must be on the branch |
