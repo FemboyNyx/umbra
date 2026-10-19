@@ -39,6 +39,8 @@ pub enum RejectReason {
     DecryptFailed,
     Malformed,
     Internal,
+    /// The sender's identity key differs from the one we trust for it.
+    KeyMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

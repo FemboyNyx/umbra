@@ -73,6 +73,8 @@ async fn add_contact(card: ContactCard, verified: bool) -> Result<Contact>;
 fn list_contacts() -> Result<Vec<Contact>>;
 fn set_verified(peer_id: String, verified: bool) -> Result<()>;
 fn remove_contact(peer_id: String) -> Result<()>;
+fn accept_key_change(peer_id: String) -> Result<Contact>;   // ADDITION (security)
+fn reject_key_change(peer_id: String) -> Result<()>;        // ADDITION (security)
 ```
 
 QR payload:
@@ -88,6 +90,36 @@ query). At most 6 addresses are written.
 * `SelfInfo.fingerprint`: our 30-digit half (6 groups of 5).
 * `Contact.safety_number`: 60 digits (12 groups of 5), identical on both
   devices. Show it on the contact screen and let the user mark `verified`.
+
+## Identity key changes
+
+A known contact (same PeerId, i.e. same Ed25519 device key, which Noise
+authenticates) can present a **different Olm identity key**: in its `Hello`,
+in its answer to a one-time-key claim, or in a re-scanned QR passed to
+`add_contact`. Core never trusts it automatically:
+
+1. The new key is **rejected** (`Hello` gets `Rejected(KeyMismatch)`, the
+   key claim is not used, `add_contact` returns an error). Messages keep
+   using the old, trusted key.
+2. The contact is flagged: `Contact.key_changed = true`,
+   `Contact.pending_identity_key = Some(new)`.
+3. `CoreEvent::KeyChanged { peer_id, old_identity_key, new_identity_key,
+   old_safety_number, new_safety_number, source }` is emitted **once per
+   distinct new key** (`source`: `Hello | KeyClaim | ContactCard`).
+
+The app should show a blocking warning and ask the user to compare the
+`new_safety_number` in person, then call one of:
+
+* `accept_key_change(peer_id)`: the pending key becomes the identity key,
+  old Olm sessions are dropped, `verified` is set to **false**, the flag is
+  cleared, and queued messages are re-sent under the new key.
+* `reject_key_change(peer_id)`: keep the old key. The refused key is
+  remembered and is rejected silently from then on; a *different* new key
+  alerts again.
+
+Both return an error if nothing is pending. The DB schema moved to v2
+(columns `pending_identity_key`, `rejected_identity_key`, `key_changed_at`);
+v1 databases are migrated on `init`.
 
 ## Messaging
 
@@ -130,7 +162,9 @@ struct CoreConfig {
 struct SelfInfo { peer_id, fingerprint, qr_payload, display_name, identity_key, ed25519_key, addrs: Vec<String> }
 struct ContactCard { peer_id, identity_key, ed25519_key, addrs: Vec<String>, display_name: Option<String> }
 struct Contact { peer_id, display_name, identity_key, ed25519_key, addrs, verified: bool,
-                 safety_number, added_at_ms: i64, online: bool }
+                 safety_number, added_at_ms: i64, online: bool,
+                 key_changed: bool, pending_identity_key: Option<String> }
+enum KeyChangeSource { Hello, KeyClaim, ContactCard }
 struct Message { id, peer_id, outgoing: bool, body, timestamp_ms: i64, status: DeliveryStatus, read: bool }
 struct ConversationSummary { peer_id, display_name, last_message: Option<Message>, unread_count: u32, updated_at_ms: i64 }
 struct NetworkInfo { running: bool, listen_addrs: Vec<String>, connected_peers: u32, relay_reservations: u32 }
@@ -144,6 +178,8 @@ enum CoreEvent {
     ContactRequest { card: ContactCard },
     Signal { peer_id: String, call_id: String, kind: SignalKind, payload: String },
     NetworkStatus { info: NetworkInfo },
+    KeyChanged { peer_id: String, old_identity_key: String, new_identity_key: String,
+                 old_safety_number: String, new_safety_number: String, source: KeyChangeSource },
 }
 ```
 
@@ -161,7 +197,8 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
    incoming messages; `MessageStatus` events also carry `peer_id`.
 3. Additions: `CoreConfig.listen_addrs`, `CoreConfig.mock`, `network_status()`,
    `SelfInfo.{identity_key, ed25519_key, addrs}`, optional `name=` in the QR,
-   `Contact.{safety_number, added_at_ms, online}`.
+   `Contact.{safety_number, added_at_ms, online, key_changed, pending_identity_key}`,
+   `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change`.
 
 ## Protocol summary
 
@@ -176,7 +213,7 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
   The claimer checks `identity_key` equals the one from the QR.
 * **`/umbra/msg/1`** (CBOR): `Hello { card }` (once per connection) or
   `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
-  `Rejected(NotAContact | DecryptFailed | Malformed | Internal)`.
+  `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch)`.
   Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal}`; `to` must be
   the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per
   peer, pre-key messages matched by session id.

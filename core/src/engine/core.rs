@@ -186,14 +186,71 @@ impl Core {
     }
 
     fn safety_for(&self, c: &ContactRow) -> String {
+        self.safety_with_key(c, &c.identity_key)
+    }
+
+    /// Safety number this contact would have with `identity_key`.
+    fn safety_with_key(&self, c: &ContactRow, identity_key: &str) -> String {
         let theirs = (|| -> Result<String> {
             let peer = parse_peer(&c.peer_id)?;
             let ed = unb64(&c.ed25519_key)?;
-            let ik = Curve25519PublicKey::from_base64(&c.identity_key)?;
+            let ik = Curve25519PublicKey::from_base64(identity_key)?;
             Ok(fingerprint_of(&peer, &ed, &ik))
         })()
         .unwrap_or_default();
         safety::safety_number(&self.id.fp_digits, &theirs)
+    }
+
+    /// A known contact presented `presented_ik` instead of its trusted key.
+    /// Never trusts it: flags the contact and emits `KeyChanged` once per
+    /// distinct key. Keys the user rejected are ignored silently.
+    fn on_key_mismatch(&self, c: &ContactRow, presented_ik: &str, source: KeyChangeSource) {
+        if Curve25519PublicKey::from_base64(presented_ik).is_err() {
+            return;
+        }
+        tracing::warn!(peer = %c.peer_id, ?source, "contact presented a different identity key");
+        if c.rejected_identity_key.as_deref() == Some(presented_ik)
+            || c.pending_identity_key.as_deref() == Some(presented_ik)
+        {
+            return;
+        }
+        if let Err(e) = self
+            .store
+            .set_pending_key(&c.peer_id, presented_ik, now_ms())
+        {
+            tracing::error!("store pending key: {e:#}");
+            return;
+        }
+        self.events.emit(CoreEvent::KeyChanged {
+            peer_id: c.peer_id.clone(),
+            old_identity_key: c.identity_key.clone(),
+            new_identity_key: presented_ik.to_string(),
+            old_safety_number: self.safety_for(c),
+            new_safety_number: self.safety_with_key(c, presented_ik),
+            source,
+        });
+    }
+
+    /// Trust the contact's pending new identity key. Old Olm sessions are
+    /// dropped, the contact becomes unverified, and queued messages are
+    /// re-sent under the new key.
+    pub fn accept_key_change(self: &Arc<Self>, peer_id: &str) -> Result<Contact> {
+        let peer = parse_peer(peer_id)?;
+        self.store.accept_pending_key(peer_id)?;
+        self.crypto.forget_sessions(peer_id)?;
+        self.ns().greeted.remove(&peer);
+        self.spawn_flush(peer);
+        let row = self
+            .store
+            .get_contact(peer_id)?
+            .ok_or_else(|| anyhow!("unknown contact {peer_id}"))?;
+        Ok(self.to_contact(row))
+    }
+
+    /// Keep the old key. The refused key is remembered and won't alert again;
+    /// a different new key will.
+    pub fn reject_key_change(&self, peer_id: &str) -> Result<()> {
+        self.store.reject_pending_key(peer_id)
     }
 
     fn to_contact(&self, row: ContactRow) -> Contact {
@@ -216,10 +273,14 @@ impl Core {
             bail!("cannot add yourself as a contact");
         }
         if let Some(existing) = self.store.get_contact(&card.peer_id)? {
-            if existing.identity_key != card.identity_key
-                || existing.ed25519_key != card.ed25519_key
-            {
-                bail!("this contact's keys changed; remove and re-add them only after verifying in person");
+            // Same PeerId implies same ed25519 key (validated), so only the
+            // Olm identity key can differ.
+            if existing.identity_key != card.identity_key {
+                self.on_key_mismatch(&existing, &card.identity_key, KeyChangeSource::ContactCard);
+                bail!(
+                    "this contact's identity key changed; compare safety numbers, then call \
+                     accept_key_change or reject_key_change"
+                );
             }
         }
         let prev = self.store.get_contact(&card.peer_id)?;
@@ -240,6 +301,8 @@ impl Core {
             },
             verified: verified || prev.as_ref().is_some_and(|p| p.verified),
             added_at: prev.as_ref().map(|p| p.added_at).unwrap_or_else(now_ms),
+            pending_identity_key: prev.as_ref().and_then(|p| p.pending_identity_key.clone()),
+            rejected_identity_key: prev.as_ref().and_then(|p| p.rejected_identity_key.clone()),
         };
         self.store.upsert_contact(&row)?;
         let handle = self.ns().handle.clone();
@@ -593,9 +656,9 @@ impl Core {
         }
         match self.store.get_contact(&card.peer_id) {
             Ok(Some(c)) => {
-                if c.identity_key != card.identity_key || c.ed25519_key != card.ed25519_key {
-                    tracing::warn!(%peer, "hello with changed keys ignored");
-                    return MsgResponse::Rejected(RejectReason::Malformed);
+                if c.identity_key != card.identity_key {
+                    self.on_key_mismatch(&c, &card.identity_key, KeyChangeSource::Hello);
+                    return MsgResponse::Rejected(RejectReason::KeyMismatch);
                 }
                 let addrs = (!card.addrs.is_empty()).then_some(card.addrs.as_slice());
                 let _ = self.store.update_contact_seen(
@@ -745,6 +808,12 @@ impl Core {
                 one_time_key,
             } => {
                 if identity_key != contact.identity_key {
+                    // Re-read so pending/rejected state is current.
+                    let c = self
+                        .store
+                        .get_contact(&contact.peer_id)?
+                        .unwrap_or(contact.clone());
+                    self.on_key_mismatch(&c, &identity_key, KeyChangeSource::KeyClaim);
                     return Err(DeliverError::Retry(anyhow!(
                         "peer presented a different identity key"
                     )));
@@ -846,5 +915,147 @@ impl Core {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(crate) fn open(
+        key: u8,
+    ) -> (
+        Arc<Core>,
+        tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = EventHub::new();
+        let rx = hub.subscribe();
+        let core = Core::open(dir.path(), &[key; 32], CoreConfig::default(), hub).unwrap();
+        (core, rx, dir)
+    }
+
+    fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<CoreEvent> {
+        let mut v = vec![];
+        while let Ok(e) = rx.try_recv() {
+            v.push(e);
+        }
+        v
+    }
+
+    fn key_changes(evs: &[CoreEvent]) -> Vec<&CoreEvent> {
+        evs.iter()
+            .filter(|e| matches!(e, CoreEvent::KeyChanged { .. }))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn key_change_is_flagged_rejected_and_resolvable() {
+        let (a, mut rx, _da) = open(1);
+        let (b, _rxb, _db) = open(2);
+        let card_b = b.self_card();
+        let pb = card_b.peer_id.clone();
+        let peer_b: PeerId = pb.parse().unwrap();
+        a.add_contact(card_b.clone(), true).await.unwrap();
+        drain(&mut rx);
+
+        // B (same device key / PeerId) shows up with a different Olm identity key.
+        let forged = |ik: Curve25519PublicKey| ContactCard {
+            identity_key: ik.to_base64(),
+            ..card_b.clone()
+        };
+        let ik2 = vodozemac::olm::Account::new().curve25519_key();
+        let r = a.handle_msg(peer_b, MsgRequest::Hello { card: forged(ik2) });
+        assert_eq!(r, MsgResponse::Rejected(RejectReason::KeyMismatch));
+        let evs = drain(&mut rx);
+        let kc = key_changes(&evs);
+        assert_eq!(kc.len(), 1);
+        let CoreEvent::KeyChanged {
+            peer_id,
+            old_identity_key,
+            new_identity_key,
+            old_safety_number,
+            new_safety_number,
+            source,
+        } = kc[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(peer_id, &pb);
+        assert_eq!(old_identity_key, &card_b.identity_key);
+        assert_eq!(new_identity_key, &ik2.to_base64());
+        assert_ne!(old_safety_number, new_safety_number);
+        assert_eq!(*source, KeyChangeSource::Hello);
+
+        // Not trusted: old key kept, contact flagged, still verified=true until resolved.
+        let c = &a.list_contacts().unwrap()[0];
+        assert_eq!(c.identity_key, card_b.identity_key);
+        assert!(c.key_changed);
+        assert_eq!(
+            c.pending_identity_key.as_deref(),
+            Some(ik2.to_base64().as_str())
+        );
+
+        // Same key again (Hello or re-scanned card): still rejected, no duplicate alert.
+        assert_eq!(
+            a.handle_msg(peer_b, MsgRequest::Hello { card: forged(ik2) }),
+            MsgResponse::Rejected(RejectReason::KeyMismatch)
+        );
+        assert!(a.add_contact(forged(ik2), false).await.is_err());
+        assert!(key_changes(&drain(&mut rx)).is_empty());
+        // Key claims are refused to nobody else: the old key still answers.
+        assert_eq!(
+            a.handle_msg(
+                peer_b,
+                MsgRequest::Hello {
+                    card: card_b.clone()
+                }
+            ),
+            MsgResponse::Ok
+        );
+
+        // Reject: flag cleared, the refused key never alerts again.
+        a.reject_key_change(&pb).unwrap();
+        assert!(!a.list_contacts().unwrap()[0].key_changed);
+        assert_eq!(
+            a.handle_msg(peer_b, MsgRequest::Hello { card: forged(ik2) }),
+            MsgResponse::Rejected(RejectReason::KeyMismatch)
+        );
+        assert!(key_changes(&drain(&mut rx)).is_empty());
+        assert!(a.reject_key_change(&pb).is_err(), "nothing pending");
+
+        // A different new key alerts again (via a scanned card this time).
+        let ik3 = vodozemac::olm::Account::new().curve25519_key();
+        assert!(a.add_contact(forged(ik3), false).await.is_err());
+        let evs = drain(&mut rx);
+        let kc = key_changes(&evs);
+        assert_eq!(kc.len(), 1);
+        assert!(matches!(
+            kc[0],
+            CoreEvent::KeyChanged {
+                source: KeyChangeSource::ContactCard,
+                ..
+            }
+        ));
+
+        // Accept: new key trusted, contact unverified, flag cleared.
+        let c = a.accept_key_change(&pb).unwrap();
+        assert_eq!(c.identity_key, ik3.to_base64());
+        assert!(!c.verified && !c.key_changed && c.pending_identity_key.is_none());
+        assert_eq!(
+            a.handle_msg(peer_b, MsgRequest::Hello { card: forged(ik3) }),
+            MsgResponse::Ok
+        );
+        assert_eq!(
+            a.handle_msg(
+                peer_b,
+                MsgRequest::Hello {
+                    card: card_b.clone()
+                }
+            ),
+            MsgResponse::Rejected(RejectReason::KeyMismatch),
+            "the old key is now the changed one"
+        );
     }
 }

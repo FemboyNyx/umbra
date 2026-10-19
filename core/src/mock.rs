@@ -156,6 +156,8 @@ impl MockCore {
             safety_number: safety::safety_number(&st.fp_digits, &theirs),
             added_at_ms: now_ms(),
             online: true,
+            key_changed: false,
+            pending_identity_key: None,
         };
         st.contacts.retain(|x| x.peer_id != c.peer_id);
         st.contacts.push(c.clone());
@@ -182,6 +184,14 @@ impl MockCore {
             .ok_or_else(|| anyhow!("unknown contact"))?;
         c.verified = v;
         Ok(())
+    }
+
+    pub fn accept_key_change(&self, peer_id: &str) -> Result<Contact> {
+        Err(anyhow!("no pending key change for {peer_id}"))
+    }
+
+    pub fn reject_key_change(&self, peer_id: &str) -> Result<()> {
+        Err(anyhow!("no pending key change for {peer_id}"))
     }
 
     pub fn remove_contact(&self, peer_id: &str) -> Result<()> {
