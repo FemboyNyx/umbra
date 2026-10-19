@@ -1404,12 +1404,12 @@ inside Olm signals. For groups there are two options:
    file attachments, plus server packs. No API key and no external search.
 9. ~~**Owner recovery:** required or optional?~~ **Decided:** required at
    server creation.
-10. **Legal:** host operators store ciphertext they can't read, for people
-    they may not know, and now purge on expiry. The operator duties that Syd's
-    review asked for are in [Operator duties](#operator-duties-legal-driven-phase-1),
-    with the analysis in [legal.md §4](legal.md#4-community-servers-and-blind-hosts).
-    **Open:** the items Syd couldn't verify in §4.6, and whether members can
-    be told about a specific hold.
+10. ~~**Legal:** exposure for host operators?~~ **Resolved (Syd):** answered by
+    [legal.md §4](legal.md#4-community-servers-and-blind-hosts) (#29, #32), and
+    the resulting duties are in [Operator duties](#operator-duties-legal-driven-phase-1).
+    Members are told about a hold or disclosure only when the law allows
+    (legal.md §4.4). The items Syd couldn't verify are tracked in
+    [legal.md §4.6](legal.md#46-couldnt-verify-open-items), not here.
 11. ~~**Disappearing timer start.**~~ **Decided (Chi):** Signal-style. The
     timer starts at send on the sender's device and on hosts, and at read on
     each recipient's device, with a hard cap of `sent + timer + 7 days` for
