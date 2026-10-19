@@ -1,0 +1,63 @@
+// Builds libumbra_core.so with cargokit when cargo is on PATH.
+// Without cargo, the Android library is empty and the Dart mock backend runs.
+
+import org.apache.tools.ant.taskdefs.condition.Os
+
+group = "io.github.femboynyx.umbra.rust_lib"
+version = "1.0"
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath("com.android.tools.build:gradle:9.1.0")
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+
+android {
+    namespace = "io.github.femboynyx.umbra.rust_lib"
+    compileSdk = 36
+    ndkVersion = android.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        minSdk = 24
+    }
+}
+
+def umbraCoreDir = file("../../../core")
+def umbraCargo = null
+def pathEnv = System.getenv("PATH")
+if (pathEnv != null) {
+    def exe = Os.isFamily(Os.FAMILY_WINDOWS) ? "cargo.exe" : "cargo"
+    umbraCargo = pathEnv.split(File.pathSeparator).collect { new File(it, exe) }.find { it.isFile() && it.canExecute() }
+}
+
+if (umbraCoreDir.exists() && new File(umbraCoreDir, "Cargo.toml").exists() && umbraCargo != null) {
+    logger.lifecycle("Umbra: cargokit building ${umbraCoreDir} (libumbra_core)")
+    apply from: "../cargokit/gradle/plugin.gradle"
+    cargokit {
+        // Relative to this file (rust_builder/android). An absolute path is
+        // joined onto that directory by cargokit and misses core/Cargo.toml.
+        manifestDir = "../../../core"
+        libname = "umbra_core"
+    }
+} else {
+    logger.lifecycle("Umbra: cargo or core/Cargo.toml unavailable; Android build will not embed umbra_core. The Dart mock backend still runs.")
+}

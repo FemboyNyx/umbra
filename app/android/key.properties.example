@@ -1,0 +1,6 @@
+# Copy to app/android/key.properties at build time (never commit the real file).
+# CI writes this next to android/ with storeFile=upload-keystore.jks.
+storePassword=CHANGE_ME_STORE_PASSWORD
+keyPassword=CHANGE_ME_KEY_PASSWORD
+keyAlias=umbra
+storeFile=upload-keystore.jks
