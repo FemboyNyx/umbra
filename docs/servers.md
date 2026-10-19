@@ -1,40 +1,51 @@
 # Community servers (design)
 
 Status: **design only, nothing here is implemented.** Written against main at
-`e92d367`. It builds on what core does today, described in
+`b79c7af`. It builds on what core does today, described in
 [architecture.md](architecture.md), [threat-model.md](threat-model.md),
 [core-api.md](core-api.md) and [tor.md](tor.md). Numbers marked
 **(proposed)** are design defaults we picked and can change. Everything
-else is either read from the code or cited.
+else is either read from the code or cited. Decisions marked **(Nyx)** are
+Nyx's answers from 2026-10-19.
 
 Nyx asked for Discord-style servers: channels, mostly peer-to-peer and hosted
-by the community, with optional discovery somewhere else, contents hidden from
-everyone outside the server, and file uploads, GIFs and link embeds. This doc
-says how to build that on top of the current core, and where the security
-story is weaker than "encrypted" suggests.
+by the community, contents hidden from everyone outside the server, and file
+uploads, GIFs and link embeds. Nyx later added two features: **host sanity
+checks** (clients notice when a host drops or withholds data) and
+**disappearing messages**. This doc says how to build all of that on top of
+the current core, and where the security story is weaker than "encrypted"
+suggests.
 
 ## Summary of decisions
 
-| Topic | Decision | Differs from Chi's call? |
+| Topic | Decision | Source |
 | --- | --- | --- |
-| Group crypto | vodozemac Megolm v1, one outbound session **per sender per channel**, keys shared over Olm | Yes, Megolm is per sender, not per channel. See [Group crypto](#group-crypto) |
-| Hosts | Default host is a **blind store-and-forward host**. It holds ciphertext and never gets session keys. A **member host** (headless member that reads everything) is allowed but labelled as one | Yes. Chi's host is a member, and a member host can read everything |
-| Who can talk to whom | New "co-member" trust class in core, because Olm today only works between mutual contacts | New. Chi's call assumed existing Olm channels between members, and they don't exist |
-| Membership | Owner-signed manifest with a sequence number, plus admin-signed roster ops | Mostly agrees. Adds rollback and fork rules, recovery keys and ownership transfer |
-| Bans | Enforced by rotation and host ACLs. A banned member keeps whatever they already decrypted or hold keys for | Agrees, with that limit stated plainly |
-| Index | Opt-in signed listings on a new `/umbra/index/1` protocol that anyone can run | Agrees. Adds that announcing and searching reveal IP and PeerId unless Tor is on |
-| Public servers | Allowed, but labelled honestly: anyone who can join can read | New caveat |
-| Files | Chunked, content-addressed, one key per file, fetched over a separate `/umbra/blob/1` | Agrees. Adds that fetching reveals your IP to whoever serves the chunks |
-| Embeds and GIFs | Sender-side previews, GIF search off by default with a warning | Agrees |
-| Names | The suffix is for **telling people apart, never for trust**. Hash-derived suffixes can be ground cheaply at any length people would read | Yes. A short suffix can't be made grind-proof (math in [Names](#names-and-impersonation)) |
+| Group crypto | vodozemac Megolm v1, one outbound session **per sender per channel**, keys shared over Olm | Pushback on Chi's call: Megolm is per sender, not per channel. See [Group crypto](#group-crypto) |
+| Hosts | Default host is a **blind store-and-forward host**, shipped as a **standalone headless program**. It holds ciphertext and never gets session keys. A **member host** (headless member that reads everything) is allowed but labelled as one | Decided. Pushback on Chi's call: a member host can read everything |
+| Who can talk to whom | New "co-member" trust class in core, because Olm today only works between mutual contacts. DMs from co-members who aren't contacts arrive as **message requests** | Decided |
+| Membership | Owner-signed manifest with a sequence number, plus admin-signed roster ops. **Recovery keys are required** at server creation | Decided. Adds rollback and fork rules and ownership transfer |
+| Invites | **Every server is invite-only.** Invites are **authorized-only**: only roles with the `invite` permission (owner and admins by default) can create them | **(Nyx)** |
+| Public servers | **Not planned.** No public or listed servers | **(Nyx)** |
+| Discovery | **Umbra runs no directory and no bootstrap.** The app only joins (by invite), creates, and shows your servers. User-added directories are a **proposed extension**, pending Nyx | **(Nyx)**, extension pending |
+| History for new members | **On by default**: new members can read earlier history. Configurable per server and per channel. "History from join" is the alternative setting | **(Nyx)**, confirm with Nyx (see open questions) |
+| Identity | A **default identity** used across servers, which users can customise per server (per-server profile). A **separate identity per server** is an option | **(Nyx)**, confirm with Nyx (see open questions) |
+| Bans | Enforced by rotation and host ACLs. A banned member keeps whatever they already decrypted or hold keys for | Agrees with Chi, with that limit stated plainly |
+| Files | Chunked, content-addressed, one key per file, fetched over a separate `/umbra/blob/1` | Agrees with Chi. Adds that fetching reveals your IP to whoever serves the chunks |
+| Limits | **250 members, 100 MiB per file, 30-day host ciphertext retention** | Decided |
+| Embeds and GIFs | Sender-side link previews. **No GIF provider or API key.** GIFs are ordinary encrypted file attachments, plus optional per-server sticker and GIF packs uploaded by admins | **(Nyx)** |
+| Host sanity checks | Per-sender sequence numbers and hash chains inside the encrypted payload, sender-signed heads, host-signed receipts, and cross-checks with other members. Gaps that no expiry, retention or deletion explains raise an alert | New feature (Nyx) |
+| Disappearing messages | Timer per chat or channel, or a role policy. The shortest timer wins. Expiry is inside the encrypted payload. Clients and hosts delete at expiry, best effort | New feature (Nyx) |
+| Names | The suffix is for **telling people apart, never for trust**. Hash-derived suffixes can be ground cheaply at any length people would read | Pushback on Chi's call 8. Math in [Names](#names-and-impersonation) |
 
 ## What exists today and what servers need
 
-| Need | Core at `e92d367` | Gap |
+| Need | Core at `b79c7af` | Gap |
 | --- | --- | --- |
 | Encrypt to many peers | Olm v1 for 1:1 only. `PayloadBody` is `Text` or `Signal` | Megolm sessions, new payload kinds |
 | Talk to a member who isn't your contact | Not possible. `Hello` from a non-contact gets `Rejected(NotAContact)` and raises `ContactRequest`. One-time keys are only served to contacts | Co-member trust class (below) |
 | Offline delivery | Outbox only, 7-day TTL, and both peers have to be online at once | Hosts store and forward server traffic |
+| Detect lost or withheld messages | Nothing. `Payload` has no per-chat sequence number, and an outbox entry that expires is silently dropped on the receiving side | Sequence numbers, hash chains and heads ([Host sanity checks](#host-sanity-checks)) |
+| Disappearing messages | Not implemented (listed in architecture.md) | Expiry in the payload, purge on clients and hosts ([Disappearing messages](#disappearing-messages)) |
 | Key change handling | `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change` (PR #20) | Apply the same pins to co-members |
 | Abuse limits | Token buckets in `engine/limits.rs` on `Hello`, contact requests and OTK claims (PR #20) | Per-member post, key-share and blob limits |
 | Tor | SOCKS or embedded arti, dial-only. Onion listening is experimental behind `tor-listen` | Tor-only members can't receive direct fan-out, so they rely on hosts |
@@ -52,37 +63,46 @@ story is weaker than "encrypted" suggests.
 2. **Co-member trust class.** A peer whose card (with a valid v2 signature) is
    in the current roster of a server we're in may complete `Hello`, claim
    one-time keys and send Olm messages, but **only server-scoped payloads**
-   are accepted from it. A `Text` DM from a co-member who isn't a contact is
-   handled like a contact request (see open questions). The existing
-   per-peer buckets apply to co-members just as they do to contacts.
+   are accepted from it. A `Text` DM from a co-member who isn't a contact
+   arrives as a **message request** (decided): it's stored apart from the
+   inbox, shows the server it came from, raises no notification beyond a
+   collapsed "message requests" count, and sends no read receipt until the
+   user accepts. Accepting makes them a contact. The existing per-peer buckets apply to
+   co-members just as they do to contacts.
 3. **Pins carry over.** If a co-member is also a contact, or appears in two
    servers, all copies of their keys have to match. A mismatch raises
    `KeyChanged` and stops key sharing to and from that peer until the user
-   resolves it.
+   resolves it. (A separate per-server identity is a different key on
+   purpose, and doesn't count as a mismatch. See [Identity](#identity-across-servers).)
 4. **Generalise the outbox** so it can queue server-scoped Olm payloads (key
    shares, roster ops) as well as `Text`.
+5. **`Payload` v2 for DMs**: add `seq`, `prev`, `skipped` and `exp`, used by
+   [Host sanity checks](#host-sanity-checks) and
+   [Disappearing messages](#disappearing-messages).
 
 ## Overview
 
 ```mermaid
 flowchart LR
-  subgraph Server["Server S (owner key K_S)"]
+  subgraph Server["Server S (owner key K_S, invite-only)"]
     A[Member A]
     B[Member B]
     C["Member C (Tor-only)"]
     MH["Member host (optional, reads everything)"]
   end
-  BH["Blind host (ciphertext only, no session keys)"]
-  IDX["Index node (optional, signed listings only)"]
-  A <-->|"Olm: key shares, roster ops"| B
+  BH["Blind host (headless program, ciphertext only)"]
+  J["Joiner (needs an invite from an authorized role)"]
+  A <-->|"Olm: key shares, roster ops, heads"| B
   A <-->|"Olm"| C
   A -->|"Megolm envelopes, file chunks"| BH
-  B <-->|"fetch history, chunks"| BH
+  B <-->|"fetch history, chunks, receipts"| BH
   C <-->|"over Tor"| BH
   MH <-->|"is a member"| A
-  BH -.->|"announce listing (opt-in)"| IDX
-  Stranger[Anyone] -.->|"search"| IDX
+  J -.->|"JoinHello with invite proof"| A
 ```
+
+There's no index or directory node in the picture. A server is only reachable
+through an invite.
 
 ## Identifiers
 
@@ -90,9 +110,10 @@ flowchart LR
 | --- | --- | --- |
 | `ServerId` | SHA-256 of the canonical CBOR of the genesis manifest, unpadded base64url | Commits to the first owner key, and stays the same across ownership transfers |
 | `ChannelId` | 16 random bytes | Random, so hosts never see channel names |
-| Member | Device PeerId plus the v2 card | One device is one member, like contacts today. Multi-device is still out of scope |
+| Member | The PeerId of the identity used in this server (the default identity, or a per-server one) plus its v2 card | One device is one member, like contacts today. Multi-device is still out of scope |
 | `SessionId` | vodozemac `GroupSession::session_id()`, the session's Ed25519 public key in base64 | Globally unique |
 | `MessageId` | UUID v4, as today | Deduplicated per server |
+| `EnvHash` | SHA-256 of an envelope's bytes | What hash chains and receipts point at |
 | `BlobId` | SHA-256 of a ciphertext chunk | Hosts can check a chunk without the key |
 
 Every server also has a hidden **control channel** that every member can
@@ -144,6 +165,10 @@ the message is dropped if they don't match the binding. A member can't post
 as someone else, because they'd need that sender's session signing key, which
 never leaves the sender.
 
+Each outbound session also records the channel's **history policy at the
+time it was created** (`shareable: bool`) and the effective disappearing
+timer. Both matter below.
+
 ### Rotation
 
 | Trigger | What happens |
@@ -151,7 +176,9 @@ never leaves the sender.
 | A member leaves, is kicked or is banned | Every remaining member marks their outbound sessions for the affected channels as stale, and makes a new session before their next send, shared only to the new roster |
 | A member loses read access to a channel | The same, for that channel only |
 | Time or message count | Rotate after **7 days or 100 messages, whichever comes first (proposed)**. These are Matrix's defaults for `m.room.encryption` (`rotation_period_ms` and `rotation_period_msgs`) |
-| A member joins | No rotation. Senders share their current session at its current index, so the new member can't read earlier messages unless history is shared on purpose (below) |
+| The channel's history policy changes | Rotate, so a session is never part shareable and part not |
+| A disappearing timer is on | Also rotate at least once per timer period, so a whole session can be deleted once its last message expires ([Disappearing messages](#disappearing-messages)) |
+| A member joins | No rotation. Senders share their current session at its current index. Earlier messages reach the new member only through history sharing (below), which is on by default |
 
 What rotation can't do:
 
@@ -159,48 +186,107 @@ What rotation can't do:
   at index *i* can decrypt every later message in that session until it's
   rotated. Megolm's ratchet only goes forward, so you get forward secrecy
   against earlier indices only if the receiver calls `advance_to` and throws
-  the older copy away.
+  the older copy away. With history sharing on, clients keep sessions from
+  the start of the history window so they can forward them, which gives up
+  that forward secrecy inside the window (see the tradeoff below).
 - **A removed member keeps what they had.** They can still read every message
   they had keys for, including ciphertext a host keeps serving. Rotation
   protects messages sent after the removal, not before.
 - **Cost.** Each rotation is one Olm message per reader, so a burst of
   rotations in an *N*-member channel with *N* active senders is about *N²*
-  Olm messages. Phase 1 caps servers at **250 members (proposed)** for that
-  reason.
+  Olm messages. That's why servers are capped at **250 members** (decided).
 
 ### History for new members
 
-| Policy | Behaviour |
-| --- | --- |
-| `joined` (default, proposed) | You can read from the moment you joined |
-| `shared` | An admin's client forwards `export_at(index)` keys for the recent history window. The receiver marks those sessions as "forwarded by X", because an `ExportedSessionKey` isn't signed, so you're trusting X's Olm channel to bind the key to the original sender |
+**Decided (Nyx): on by default, configurable.** New members can read earlier
+messages. The setting lives in the manifest:
+
+| Setting | Where | Values |
+| --- | --- | --- |
+| `policy.history` | Server default | `shared` (default) or `from_join` |
+| `channels[].history` | Per-channel override | `inherit` (default), `shared` or `from_join` |
+| `policy.history_window` | Server | `retained` (default: everything hosts still hold, so up to the 30-day host retention) or a number of days |
+
+`from_join` is the alternative: new members only read from the moment they
+joined.
+
+**Mechanism: forwarding exported Megolm session keys.** When a client sees
+`Admit(J)` for a channel J can read whose effective policy is `shared`:
+
+1. **Senders forward their own sessions.** Each member who posted in the
+   window takes each of their own outbound sessions marked `shareable`, and
+   sends `ServerKeyForward { server_id, channel_id, sender: self, exported }`
+   over Olm to J, where `exported = export_at(i)` and *i* is the first
+   message index that's inside the window **and not expired**. Since it
+   comes over the sender's own Olm channel, it's bound to the sender as
+   strongly as a normal `ServerKey`.
+2. **Someone else covers absent senders.** For senders who are offline or
+   have left, the inviter (or an admin, or a member host) forwards the copies
+   it holds. These are marked "forwarded by X", because an
+   `ExportedSessionKey` isn't signed: X could make up a session and claim it's
+   S's. J's client checks each forwarded `session_id` against S's signed
+   heads ([Host sanity checks](#host-sanity-checks)), which list the sessions
+   S really used. Until a matching head is seen, messages from that session
+   show as "forwarded by X, not yet confirmed by S". Forwards are accepted
+   only from the original sender, from roles with the `invite` permission,
+   and from member hosts.
+3. **J fetches the window** from hosts and decrypts it with those sessions.
+
+Rules:
+
+- Only sessions created while the policy was `shared` are ever forwarded.
+  Messages posted under `from_join` never become readable to later members if
+  an admin switches the channel to `shared`, and switching to `from_join` stops
+  new forwards (what was already forwarded can't be taken back).
+- **Expired messages are never shared.** The export index skips past them,
+  sessions whose messages have all expired are deleted rather than
+  forwarded, and J's client drops anything whose `exp` has passed.
+- Forwarding is rate-limited per joiner and only goes to current roster
+  members.
+
+**Privacy tradeoff.** In a `shared` channel, posting means posting to
+everyone who joins in the future, not just to the people there now. One
+careless admit or one leaked invite exposes the whole window. Clients also
+keep old session keys around for forwarding, so a compromised device leaks
+the window's keys and not just the plaintext it already stored. The UI says
+"New members can read history" in the channel header and above the composer,
+so posters know. Channels for sensitive talk should be `from_join`, and can
+add a disappearing timer.
 
 ### Missing keys
 
 If a Megolm message arrives for an unknown `SessionId`, core keeps it in a
 bounded pending queue (**500 messages per server, 7 days (proposed)**) and
 sends `ServerKeyRequest` to the bound sender only, if that sender is in the
-roster and reachable. The UI shows "Waiting for this message's key."
+roster and reachable. The UI shows "Waiting for this message's key." A
+request for an index before the requester joined is only answered in a
+`shared` channel, and never for expired messages.
 
 ## Hosts
 
-A host is an always-on node running headless core with the host role. It
-stores and forwards server traffic for members who are offline, and it's the
-only way Tor-only members (who can't listen without the experimental
-`tor-listen`) get messages reliably. Nothing depends on a node we run.
+A host is an always-on node that stores and forwards server traffic for
+members who are offline, and it's the only way Tor-only members (who can't
+listen without the experimental `tor-listen`) get messages reliably. Nothing
+depends on a node we run.
+
+**Decided: the blind host is a standalone headless program**, separate from
+the app: a `umbra-host` binary built from `core/` with the host role and no
+UI, configured by a file (quota, retention, listen addresses, Tor). Sally
+packages it next to the app. A member host is still a normal member running
+headless core.
 
 | | Blind host (recommended default) | Member host |
 | --- | --- | --- |
 | Holds | Megolm envelopes, encrypted file chunks, Olm envelopes queued for offline members, the host ACL | Everything a member holds, including session keys |
 | Can read content | **No** | **Yes**, everything it holds keys for |
-| Knows | Member PeerIds (from its ACL), connecting IPs, which member posts and fetches when, envelope sizes, how many channels there are | Everything |
+| Knows | Member PeerIds (from its ACL), connecting IPs, which member posts and fetches when, envelope sizes, coarse expiry times, how many channels there are | Everything |
 | Can forge messages | No (Megolm signatures) | Only as itself |
-| Can drop, delay or withhold | Yes, detectable as gaps in each sender's `message_index` | Yes |
+| Can drop, delay or withhold | Yes, and clients detect it ([Host sanity checks](#host-sanity-checks)) | Yes |
 | Who should run it | Anyone, including a VPS or a friend's server | Only the owner, on hardware they control |
 
 **Recommendation:** blind hosts. A host that is also a member isn't
 "encrypted against the host". It's a member with uptime. We allow member
-hosts because some owners want a bot that answers key requests and shares
+hosts because some owners want a bot that answers key requests and forwards
 history, but the UI labels them with a role badge ("Host, can read
 everything") so members know. Chi's call 2 said "any member can act as a
 host". That's fine for a blind host. A member host should be the owner's
@@ -213,14 +299,248 @@ fetches only from PeerIds in the newest grant, authenticated by the Noise
 connection. A stranger probing the host gets `Rejected(NotAMember)`, which
 still confirms that something is listening.
 
-**Retention.** Hosts drop envelopes after **30 days (proposed)**, and the
-server policy can change that. Deleting a message asks hosts to drop it.
-Honest hosts do, and a hostile host might not.
+**Retention (decided).** Hosts keep ciphertext for **30 days** (host
+ciphertext retention), and server policy can shorten it. This window is
+signed into the manifest (`policy.retention`), so clients know which absences
+are expected. Messages with a disappearing timer are dropped at their expiry
+if that comes first. Deleting a message asks hosts to drop it. Honest hosts
+do, and a hostile host might not.
 
 **Tor.** A host should listen as an onion service once `tor-listen` stops
 being experimental. Then neither side learns the other's IP. Until then,
 Tor-only members reach a host through `relay_addrs` circuits, the same way
 they reach contacts.
+
+## Host sanity checks
+
+Nyx asked that clients notice when a host deletes, drops or withholds stored
+data, and tell the user automatically. A blind host can't read or forge
+anything, but it can make things disappear, and it can make them disappear
+for only some members. The design makes every absence either **explained**
+(by a signed expiry, retention, deletion or join window) or **flagged**.
+
+### What each message commits to
+
+Every Megolm plaintext (`ChannelPayload`) carries, per sender per channel:
+
+| Field | Meaning |
+| --- | --- |
+| `seq` | 1, 2, 3, … across every session the sender uses in this channel. Unlike Megolm's `message_index`, it doesn't reset on rotation |
+| `prev` | `EnvHash` of the sender's previous envelope in this channel, so the sender's messages form a hash chain |
+| `exp` | Absolute expiry in ms, or none ([Disappearing messages](#disappearing-messages)) |
+| `timer`, `timer_seq` | The effective timer when this was sent, and the `seq` of the sender's latest timer change |
+
+These are inside Megolm, so the host can't see or change them, and they're
+signed by the sender's session key.
+
+**Heads (signed checkpoints).** A sender's client periodically signs its
+position with its device key:
+
+```
+Head { server_id, channel_id, sender, seq, env_hash, ts,
+       sessions: [SessionId], timer, sig = ed25519(ed, "umbra-head-v1" || …) }
+```
+
+It's sent every **50 messages or 6 hours of activity, and when the app goes
+to the background (proposed)**, inside the channel (as a `Checkpoint` body)
+and directly over Olm to online members. Heads are what tell a reader that
+messages *should* exist even when nothing after them arrived. `sessions` lets
+joiners confirm forwarded history keys.
+
+**Host receipts.** A host answers each `Push` with
+`Stored { cursor, receipt }`, where `receipt` is the host's signature over
+`(server_id, channel_id, env_hash, cursor, ts)`. The sender keeps receipts.
+If the host later doesn't return that envelope, the receipt proves it was
+accepted, and it can be shown to admins.
+
+### How clients audit a host
+
+1. **Gap in a chain.** A reader holds a sender's `seq` *n* and *n + k* but
+   not what's between. Message *n + k*'s `prev` names the missing envelope's
+   `EnvHash`, so the client asks the host for it by hash
+   (`GetEnv { hash }`), then walks back the chain. The host can't substitute
+   anything, because the hash must match.
+2. **Withheld tail.** A head (from the sender or from another member) says
+   the sender reached `seq` *N*, but the host only returns up to *m < N*.
+3. **Self-audit.** Each client fetches its own recent envelopes back from
+   each host now and then (**every 6 hours, proposed**) and compares them with
+   its receipts. That catches a host that withholds from everyone, which
+   cross-checks alone can miss.
+4. **Cross-checking heads.** Members exchange `HeadsDigest { server_id,
+   channel_id, [(sender, seq, env_hash)] }` over Olm with **3 random online
+   members every 30 minutes of activity (proposed)**, and on join. If another
+   member has something you don't, you fetch it by hash from that member
+   (members serve envelopes they hold over `/umbra/srv/1`) or from another
+   host. That catches a host showing different members different things
+   (split view).
+5. **Several hosts.** If a server has more than one host, clients fetch heads
+   from all of them and compare.
+
+**Forks** are two different envelopes with the same sender and `seq`, or a
+chain whose `prev` doesn't match. A blind host can't make these, because it
+can't sign. So a fork always means the sender's client (or its session key)
+misbehaved, and it's shown against the sender, not the host.
+
+### Expected and unexpected absences
+
+A missing item is **expected**, and only gets a quiet inline marker, if any of
+these hold:
+
+| Reason | How the client knows |
+| --- | --- |
+| It expired | For a gap between *a* and *b*, every missing item was sent between `ts_a` and `ts_b`, so it expired by `ts_b + max(timer_a, timer_b)`. If `timer_seq` in *b* points inside the gap, the timer changed there; timer changes never expire, so that item has to be present, and its absence is unexpected |
+| Retention | It's older than `policy.retention` in the manifest |
+| Deleted | A signed `DeleteMessage` op covers it |
+| Before your window | It's before your join in a `from_join` channel, or before the history window |
+| No access | It's in a channel your role can't read |
+
+Everything else is **unexpected**. In particular, a host may only drop an
+item **after** its signed expiry (with **10 minutes of clock-skew slack,
+proposed**). Dropping it early is an alert, the same as any other drop.
+
+**Offline senders are never suspicious.** Silence isn't a gap: if nobody has
+seen a head or later message from a sender, the client has nothing to expect.
+Only provable absences count, meaning something a later message, a head or a
+receipt says exists. And if the host can't be reached at all, that's shown as
+"host offline", not as withholding.
+
+### Alerts and UX
+
+| Level | When | What the user sees |
+| --- | --- | --- |
+| Info | Expected absence | Inline muted marker: "3 messages expired", "Older messages are past this server's 30-day retention". No notification |
+| Warning | An unexpected absence that survives a re-fetch, a fetch by hash from at least one other source, and a **15-minute grace period (proposed)** | A persistent **host health** indicator on the server (an amber dot on the host badge and in server settings) with "Host H didn't return 2 messages from Ana". **At most one notification per host per day (proposed)**, and repeats fold into the same open incident |
+| Critical | A host contradicts its own signed receipt, or cross-checks prove a split view | A blocking banner like forks and rollbacks, with the evidence (receipts and heads) that can be sent to admins over Olm |
+| Sender fork | Two signed envelopes for one `seq` | Blocking banner against the sender |
+
+If the missing items turn up later, the incident is closed automatically and
+downgraded to "host was slow". The health page keeps a history of incidents
+per host, so owners can decide to replace a host.
+
+### What a blind host can and can't fake
+
+| A blind host can | A blind host can't |
+| --- | --- |
+| Drop, delay or withhold envelopes, chunks or relayed Olm payloads | Forge, change or reorder a sender's messages (Megolm signatures plus `prev`) |
+| Show different members different subsets (caught by cross-checks) | Fake a head or a member's `HeadsDigest` (device-key signatures, inside Olm) |
+| Drop the gossip it relays for Tor-only members, which delays detection | Make an early drop look like an expiry (the expiry is in the signed plaintext) |
+| Keep ciphertext after expiry or deletion. **Clients can't detect this** | Deny a push it signed a receipt for |
+| Refuse service entirely (shown as "host offline") | Insert messages from non-members |
+
+The weakest case is a server where every member reaches every other member
+only through one host (for example, all Tor-only). That host can drop all
+gossip and withhold uniformly. Self-audit still catches it for each sender's
+own messages, but no one can see what others were shown. More hosts, or any
+direct member links, fix that.
+
+### DMs and the outbox
+
+DMs don't go through hosts today, but the same checks apply to `Payload` v2:
+
+- `seq` per direction per contact, `prev` = SHA-256 of the previous
+  `Payload` plaintext, and `exp`.
+- **Outbox expiry.** When an undelivered message expires from the 7-day
+  outbox (or at its `exp`, if sooner), the sender's client marks it failed
+  (as today) and the next message carries `skipped: [seq ranges]`. The
+  receiver shows "1 message expired before it was delivered" as info, not as
+  an alert.
+- An unexplained gap in a DM is a warning ("A message from Ana is missing").
+  Since DMs are direct, that points at a bug or data loss on one of the two
+  devices, not at a host.
+- **Relayed DMs.** Server-scoped Olm payloads (and any future store-and-forward
+  DMs) that go through a host's `Relay` queue get host receipts, and drops
+  are alerted on like channel envelopes.
+- After a `Hello`, both sides send a `Heads` payload over Olm with their
+  last sent and received `seq`, so a missing tail shows up as soon as they
+  reconnect.
+
+### How this fits the threat model
+
+The threat model already lists "A relay operator drops traffic" and
+"Undelivered messages" under availability. Hosts make that worse, because
+they hold data for a long time. These checks turn silent loss into a visible
+signal and give admins evidence to replace a bad host. They don't add
+availability: a host that withholds can still deny service, and members
+only learn about it. They also can't prove that a host deleted anything,
+only that it didn't hand it over.
+
+## Disappearing messages
+
+### Timers and how they combine
+
+| Source | Set by | Scope |
+| --- | --- | --- |
+| Chat timer | Either person in a DM (a signed `TimerChange` in the chat, Signal-style, last change wins) | Both directions of that DM |
+| Sender timer | The sender, per channel, for their own messages | Their messages in that channel |
+| Channel timer | Admins, in `channels[].timer` in the manifest | Every message in the channel |
+| Role policy | Owner, in `policy.max_lifetime[role]` | Every message posted by that role |
+
+**The shortest timer wins.** A message's lifetime is the smallest of the
+timers that apply, and it doesn't disappear only if none apply. A sender can
+make their own messages shorter-lived than the policy, never longer. Honest
+receivers clamp anyway: they use `min(exp, ts + policy max, arrival + policy
+max)` if a sender claims a longer `exp` than the policy allows. Timers count
+**from sending (decided here)**, not from reading, because hosts and the
+integrity checks need one expiry time for everyone.
+
+Timer changes (`TimerChange` in DMs and a sender's own timer, manifest edits
+for channels and roles) never expire themselves, and are shown inline
+("Ana set messages to disappear after 1 day").
+
+### Where the expiry lives
+
+- **Inside the encrypted payload**: `exp`, `timer` and `timer_seq` in
+  `ChannelPayload` and `Payload` v2. This is the authoritative value.
+- **Signed channel settings**: channel timers and role limits are in the
+  owner-signed manifest.
+- **In the clear for hosts**: the envelope and blob headers carry
+  `exp_bucket`, the expiry rounded **up** to the next hour, so hosts know
+  when to purge. Clients check that it matches the plaintext, and treat a
+  mismatch as a sender error. The host learns roughly how long each message
+  lives, which is new metadata.
+
+Edits, reactions and replies inherit the expiry of the message they target,
+and can't extend it.
+
+### Deleting
+
+On every client, when a message expires (checked at start-up and on a timer,
+**within 1 minute of `exp`, proposed**):
+
+- delete the message row, its edits and reactions, and the quoted snippet in
+  replies (shown as "Expired message");
+- delete attachments: decrypted files, thumbnails, cached chunks and link
+  preview images;
+- delete it from the search index and from notifications that are still
+  showing;
+- drop it from the outbox if it never went out;
+- SQLCipher runs with `secure_delete = ON`, with periodic WAL checkpoints, so
+  deleted pages are overwritten rather than left in the file.
+
+**Keys.** Olm already throws away per-message keys. For Megolm, a reader calls
+`advance_to` past expired indices once no earlier message in that session is
+still alive, and deletes a whole inbound session once its last message has
+expired (rotation once per timer period makes that happen on time). Senders
+delete outbound sessions the same way. In `shared` channels, expired messages
+are never forwarded, so this doesn't conflict with history sharing.
+
+**Hosts** purge envelopes, chunks (blobs carry the longest `exp_bucket` of any
+message that references them) and relayed Olm payloads at `exp_bucket`. A
+host may not drop anything earlier, and clients alert if it does
+([Host sanity checks](#host-sanity-checks)). Whether a host really purged
+can't be checked.
+
+### Honest limits
+
+Shown to the user when they turn a timer on, in plain words:
+
+> Disappearing messages are deleted from your devices and from honest hosts.
+> Anyone who receives them can still screenshot, copy or photograph them, or
+> use a modified app that doesn't delete. A host can keep its encrypted copy.
+
+Deletion is best effort. It protects against someone who gets a device
+later, and keeps old messages from piling up. It doesn't protect against a
+recipient. Member hosts are recipients.
 
 ## Membership, roles and moderation
 
@@ -237,26 +557,28 @@ inside the Megolm-encrypted control channel):
 | Field | Notes |
 | --- | --- |
 | `server_id`, `seq`, `prev` | `seq` goes up by 1 each time, and `prev` is the hash of the previous manifest |
-| `owner`, `recovery` | The current owner public key, and 0 to 3 recovery public keys (proposed) |
+| `owner`, `recovery` | The current owner public key, and **1 to 3 recovery public keys (required, decided)** |
 | `name`, `icon` | `icon` is a `FileRef` |
-| `channels` | `ChannelId`, name, kind (`text`, later `voice`), and which roles can read and post |
-| `roster` | v2 card, role (`owner`, `admin`, `member`), `added_by`, `added_seq` |
+| `channels` | `ChannelId`, name, kind (`text`, later `voice`), which roles can read and post, `history` override and `timer` |
+| `roster` | v2 card, role (`owner`, `admin`, `member`), `added_by`, `added_seq`, optional signed per-server `profile` |
 | `bans` | PeerIds |
 | `hosts` | Host PeerIds and addresses |
-| `policy` | History visibility, who can invite, slow mode, file size limit, previews allowed, new-member limits |
+| `packs` | Sticker and GIF packs, as `FileRef`s to pack lists ([GIFs](#gifs-stickers-and-packs)) |
+| `policy` | `invite` (roles allowed to create invites, default owner and admin), `history`, `history_window`, `retention`, `max_lifetime` per role, slow mode, file size limit, previews allowed, new-member limits |
 
 Admins have to act while the owner is offline, so they sign **roster ops**
 with their device key: `RosterOp { server_id, base_seq, op, ts, sig }`,
 where `op` is `Admit`, `Kick`, `Ban`, `Unban`, `DeleteMessage`,
-`CreateChannel`, or `EditChannel`. Only the owner changes roles, recovery
-keys or hosts. Clients apply ops on top of manifest `base_seq` if the signer
-is an admin in it. The owner's client folds pending ops into the next
-manifest.
+`CreateChannel`, or `EditChannel`. `Admit` may be signed by anyone whose role
+has the `invite` permission at `base_seq`, and only for a joiner who used an
+invite that signer created. The other ops are admin-only. Only the owner
+changes roles, permissions, recovery keys or hosts. Clients apply ops on top
+of manifest `base_seq` if the signer held the needed permission in it. The
+owner's client folds pending ops into the next manifest.
 
 Rules that keep concurrent ops consistent: a ban beats an admit for the same
 PeerId. An unban requires a newer `base_seq` than the ban. An op whose
-signer stopped being an admin is dropped once a manifest without them is
-seen.
+signer lost the permission is dropped once a manifest without it is seen.
 
 ### Rollback and forks
 
@@ -269,41 +591,60 @@ seen.
 
 ### Owner key loss, compromise and transfer
 
+**Decided: recovery keys are required.** `create_server` doesn't finish until
+at least one recovery key exists. The app suggests giving it to someone else
+(an admin's device, scanned as a QR code) or writing down an exported,
+passphrase-wrapped copy.
+
 | Event | What happens |
 | --- | --- |
 | Transfer | The owner signs manifest `n+1` with `owner = K_new`. Clients accept it because `K_S` (the key at `n`) signed it. `ServerId` stays the same |
 | Loss with a backup | `export_owner_key(passphrase)` makes an Argon2id-wrapped blob. Restore it on a new device |
-| Loss with no backup | A recovery key signs a `Takeover` manifest naming a new owner. Without one, nobody can change roles, hosts or recovery keys again. Admins can keep running moderation, but that's all |
-| Compromise | A recovery-key `Takeover` that revokes `K_S` beats later manifests signed by `K_S`. If the attacker holds the recovery keys too, or there aren't any, the server is lost: members have to move to a new server, announced over Olm by admins they trust |
+| Loss with no backup | A recovery key signs a `Takeover` manifest naming a new owner. Since recovery keys are required, this path always exists unless every recovery key is lost too |
+| Compromise | A recovery-key `Takeover` that revokes `K_S` beats later manifests signed by `K_S`. If the attacker holds the recovery keys too, the server is lost: members have to move to a new server, announced over Olm by admins they trust |
 
 Recovery keys should be held by different people on different devices.
 They're as powerful as the owner key while the owner key is revoked.
 
 ### Invites and joining
 
+**Decided (Nyx): every server is invite-only, and invites are
+authorized-only.** Only roles listed in `policy.invite` can create invites.
+By default that's the owner and admins. The owner can grant it to `member`,
+but it's off by default. Clients and inviters refuse invites, `JoinHello`s and
+`Admit` ops from anyone without the permission.
+
 `umbra://join?...` carries: `server_id`, the owner key fingerprint, the
 inviter's v2 card, an `invite_id`, a 32-byte `invite_secret`, an expiry
-(**7 days by default, proposed**), max uses, and host addresses. The whole
-invite is signed by the inviter. A link pasted through an untrusted channel
-can be swapped wholesale, so the join preview shows the owner fingerprint
-and the inviter's safety number if they're a contact.
+(**7 days by default, proposed**), max uses (**1 by default, proposed**),
+an optional "needs approval" flag, and host addresses. The whole invite is
+signed by the inviter. A link pasted through an untrusted channel can be
+swapped wholesale, so the join preview shows the owner fingerprint and the
+inviter's safety number if they're a contact.
+
+An invite is a bearer secret until it's used up or expires. With history
+sharing on by default, whoever uses a leaked invite first can read the
+history window. That's why the default is a single use, and approval mode is
+there for invites that have to be posted somewhere less private.
 
 ```mermaid
 sequenceDiagram
   participant J as Joiner
-  participant I as Inviter (admin)
+  participant I as Inviter (has invite permission)
   participant H as Blind host
   participant M as Other members
   J->>I: JoinHello { card v2, invite_id, proof = HMAC(invite_secret, J PeerId) }
-  I->>I: check invite, expiry, uses, bans, policy (or wait for approval)
+  I->>I: check invite, inviter permission, expiry, uses, bans, policy (or wait for approval)
   I-->>J: Ok, then Olm session over /umbra/keys/1 and /umbra/msg/1
   I->>J: Olm: ServerManifest + RosterOp Admit(J)
   I->>M: Olm: RosterOp Admit(J)
   I->>H: HostGrant (seq + 1, adds J)
   M->>J: Olm: ServerKey (their current session, current index)
-  J->>H: Fetch(channel, after cursor)
-  H-->>J: Megolm envelopes since join
-  J->>J: decrypt with bound inbound sessions
+  M->>J: Olm: ServerKeyForward (history window, if the channel is shared)
+  M->>J: Olm: Heads
+  J->>H: Fetch(channel, from window start or join)
+  H-->>J: Megolm envelopes
+  J->>J: decrypt, check chains and heads, drop expired
 ```
 
 `JoinHello` is accepted from a non-contact only if `invite_id` is known and
@@ -322,31 +663,54 @@ can't sign roster ops.
 | Slow mode, new-member limits | Enforced by honest clients and hosts. A modified client can ignore them, but hosts and peers can still refuse its traffic |
 | Report | Sent to admins over Olm with the `MessageId`. Admins are members, so they check the message with their own inbound session, and the Megolm signature proves who sent it |
 
-## Announcing and discovery
+## Discovery
 
-This is opt-in. A server that never publishes a listing is invite-only and
-unlisted, and that's the default.
+**Decided (Nyx): Umbra doesn't list or discover servers.** There's no public
+server, no Umbra-run directory and no Umbra-run bootstrap. The app has three
+entry points:
 
-`ServerListing { server_id, seq, name, description, icon_blob, tags,
-join: invite | request, join_hosts, expires, sig }` is signed by `K_S`. It
-never has member lists, member counts or contents. A member count would be
-self-reported and impossible to check anyway.
+- **Join**: paste or scan an invite.
+- **Create**: make a new server (with its required recovery key).
+- **Your servers**: the servers you're in, from the local store
+  (`list_servers`).
 
-The index is "elsewhere": any node can run the `/umbra/index/1` role
-(`Announce`, `Search`, `Get`), and Umbra doesn't run one. Indexes only keep
-listings with a valid signature and the highest `seq`, and drop expired ones.
+A server is reachable only through an invite, which carries the host
+addresses, so servers need no bootstrap of their own. Whether core ships
+default bootstrap and relay nodes for the network in general is still open
+decision 1 in [architecture.md](architecture.md).
 
-What this reveals:
+**Public servers: not planned.** The earlier draft allowed listed servers that
+anyone could join. That's gone. If it ever comes back, it needs the warning
+that end-to-end encryption doesn't protect against someone who simply joins,
+and anyone who joined could read the history window.
 
-- **Announcing** shows the index the announcer's PeerId and IP, unless
-  they're on Tor.
-- **Searching** shows the index the searcher's IP and what they searched for,
-  unless they're on Tor.
-- An index can hide listings, or show different listings to different
-  people. It can't forge them.
-- **A listed public server isn't private from anyone who joins.** End-to-end
-  encryption keeps hosts, relays and the network out. It doesn't keep out an
-  attacker who simply joins. The UI has to say this on public servers.
+**Proposed extension, pending Nyx: user-added directories.** A user could add
+a third-party directory address themselves. A directory would only hold
+owner-signed `ServerListing { server_id, seq, name, description, icon,
+join_hosts, expires, sig }` entries, with no member lists or contents, and
+joining through one would still be **request-to-join**, approved by a role
+with the `invite` permission, so servers stay invite-only. The costs, if
+Nyx wants it: announcing shows the directory the owner's PeerId and IP, and
+searching shows the searcher's IP and query, unless they're on Tor. A
+directory can hide listings or show different people different ones, but it
+can't forge them. Nothing in phases 0 to 3 depends on this.
+
+## Identity across servers
+
+**Decided (Nyx), to confirm with Nyx: a default identity that users can
+customise per server.**
+
+| Option | What it is | Linkability |
+| --- | --- | --- |
+| **Default identity** (default) | Your device identity (PeerId, v2 card) and your global display name and avatar, the same in every server and DM | Members of two servers, and your contacts, can tell it's the same person. Hosts of different servers can match your PeerId |
+| **Per-server profile** | The same identity with a different name, avatar or bio for one server: a `profile` signed by your device key in your roster entry | Changes what people see, not what links you. Same PeerId, so anyone in both places can still link you, and your contacts still see your verified badge |
+| **Separate identity per server** (option) | A fresh Ed25519 key, Olm account and v2 card made for that server at create or join | Not linkable by keys. What's left: on clearnet the same IP, timing (both identities online at the same moments), writing style, and a host that serves both servers. Contacts in that server don't get a verified badge until they verify the new key |
+
+A separate identity needs real core work. Noise authenticates a libp2p
+connection as one PeerId, so each identity needs its own swarm and its own
+connections. In Tor mode each identity should use separate circuits
+(arti stream isolation, or a separate SOCKS username with system Tor).
+Otherwise one connection pattern links them. That's why it's phase 2.
 
 ## Files
 
@@ -356,9 +720,10 @@ What this reveals:
 | Cipher | XChaCha20-Poly1305 in RustCrypto's `aead::stream` (STREAM) construction, so chunks can't be reordered or the file truncated. That means a new dependency (`chacha20poly1305`), from the same RustCrypto family as our `sha2` and `hkdf` |
 | Chunks | **256 KiB (proposed)**. Each chunk is addressed by `BlobId = SHA-256(ciphertext)` |
 | Message | The Megolm message carries `FileRef { name, mime, size, chunks: [BlobId], key, thumb }` |
-| Limits | **100 MiB per file (proposed)**, and server policy can lower it. Hosts also enforce a per-server quota |
+| Limits | **100 MiB per file (decided)**, and server policy can lower it. Hosts also enforce a per-server quota |
 | Thumbnails | Made by the sender and uploaded as their own small encrypted blob |
 | Metadata | **(app)** strips EXIF and GPS before upload, on by default |
+| Expiry | Blobs carry `exp_bucket` when every message that references them disappears |
 | Transport | `/umbra/blob/1` (`Have`, `Get { id, offset, len }`, `Put`), separate from messages. Chunks come from hosts or from members who have them |
 
 Fetching a chunk shows whoever serves it your IP (unless you're on Tor) and
@@ -383,15 +748,29 @@ to the message. Receivers never contact the site.
 - Fetching previews can be switched off in settings, and server policy can
   ban previews entirely.
 
-## GIFs
+## GIFs, stickers and packs
 
-A GIF is just an encrypted file upload, with the same path and limits as any
-file. GIF search through a provider like Tenor or GIPHY is **off by default**.
-Turning it on shows a warning that the provider sees what you search for, your
-IP (unless you're on Tor) and when. The picked GIF is downloaded by the
-sender and uploaded as an encrypted blob, so receivers never contact the
-provider. Which provider to use, and its API key and terms, is an open
-question.
+**Decided (Nyx): no GIF provider, no API key and no external search.** That
+replaces the earlier GIF-search design, and removes the problem of a key
+embedded in an AGPL binary.
+
+- **A GIF is a file.** Users pick a GIF (or a WebP or short video) from
+  their device and send it as an ordinary encrypted attachment, through the
+  same XChaCha20-Poly1305 chunked path and limits as any file. The app keeps
+  a local "recent and favourite GIFs" list of `FileRef`s, so resending one
+  doesn't re-upload it.
+- **Server packs.** Admins can upload sticker and GIF packs. A pack is an
+  encrypted file holding `Pack { pack_id, name, items: [{ name, FileRef }] }`
+  (**at most 200 items of 5 MiB each, proposed**), and the manifest lists the
+  packs as `FileRef`s. Members fetch packs from hosts like any blob and cache
+  them. Sending a pack item sends its `FileRef`, so nothing is uploaded
+  again. Removing a pack is a manifest edit. Members who already have it keep
+  it.
+- Pack items never disappear on their own. A message that uses one does, but
+  the pack's blobs stay until the pack is removed.
+- A GIF link pasted into chat is just a link, with a sender-side preview.
+
+Nobody contacts a third party to send or receive a GIF.
 
 ## Names and impersonation
 
@@ -437,7 +816,7 @@ from the following:
   admin also means getting the admin role.
 - **Lookalike warning.** When a name collides with a contact or with an admin
   or owner in the server, the newer member's name gets a warning ("Not the
-  same person as …").
+  same person as …"). Per-server profile names go through the same check.
 - **Avatars** are member-chosen and shown, but they're not identity.
 - The full PeerId and safety number are always one tap away.
 
@@ -452,35 +831,45 @@ the enum, as for `SignalKind`. Older cores fail to decode them and reply
 | Variant | Purpose |
 | --- | --- |
 | `ServerKey { server_id, channel_id, session_key }` | Share an outbound Megolm session |
-| `ServerKeyForward { server_id, channel_id, sender, exported }` | `shared` history. Marked as forwarded |
+| `ServerKeyForward { server_id, channel_id, sender, exported }` | History sharing. Marked as forwarded unless `sender` is the Olm sender |
 | `ServerKeyRequest { server_id, channel_id, session_id, from_index }` | Ask the bound sender again |
 | `ServerManifest { bytes }` | Owner-signed manifest |
-| `ServerOp { bytes }` | Admin-signed roster op |
+| `ServerOp { bytes }` | Roster op |
 | `ServerInvite { link }` | An invite sent in a DM |
+| `Heads { scope, heads: [Head] }` | Signed heads for channels, or last sent and received `seq` for a DM |
+| `HeadsDigest { server_id, channel_id, entries }` | Cross-check with another member |
+| `TimerChange { timer }` | DM timer change. Never expires |
+
+**`Payload` v2 (DMs):** `Payload { v: 2, to, id, ts, seq, prev, skipped?,
+exp?, timer?, body }`.
 
 **`MsgRequest::JoinHello { card, server_id, invite_id, proof }`** on
-`/umbra/msg/1`, plus `RejectReason::NotAMember`, `InviteInvalid` and
-`Banned` at the end of the enum.
+`/umbra/msg/1`, plus `RejectReason::NotAMember`, `InviteInvalid`,
+`NotAuthorized` (inviter lacks the `invite` permission) and `Banned` at the
+end of the enum.
 
 **Megolm plaintext** (JSON, like `Payload`):
 
 ```
-ChannelPayload { v, server_id, channel_id, id, ts,
+ChannelPayload { v, server_id, channel_id, id, ts, seq, prev, exp?, timer?, timer_seq,
   body: Text { text, reply_to? } | File { file: FileRef, caption? }
-      | Edit { target, text } | Delete { target } | React { target, emoji },
+      | Edit { target, text } | Delete { target } | React { target, emoji }
+      | Checkpoint { head } | TimerChange { timer },
   preview?: LinkPreview }
 ```
 
 It's padded to power-of-two buckets up to 64 KiB **(proposed)** before
 encryption, because blind hosts see envelope sizes.
 
-**`/umbra/srv/1`** (to hosts, and between members for live fan-out):
+**`/umbra/srv/1`** (to hosts, and between members for live fan-out and
+cross-checks):
 
 | Request | Response |
 | --- | --- |
-| `Push { env: Envelope }` where `Envelope { server_id, channel_id, session_id, megolm }` | `Stored { cursor }` or `Rejected(reason)` |
+| `Push { env: Envelope }` where `Envelope { server_id, channel_id, session_id, exp_bucket?, megolm }` | `Stored { cursor, receipt }` or `Rejected(reason)` |
 | `Fetch { server_id, channel_id, after, limit }` | `Envelopes { items, next }` |
-| `Relay { to: PeerId, olm: { t, c } }` | `Queued`. Store-and-forward of Olm payloads for offline members. The host sees who sent what to whom |
+| `GetEnv { server_id, hashes: [EnvHash] }` | `Envelopes { items }`. Hosts and members both answer, which is how gaps are filled |
+| `Relay { to: PeerId, olm: { t, c }, exp_bucket? }` | `Queued { receipt }`. Store-and-forward of Olm payloads for offline members. The host sees who sent what to whom |
 | `FetchRelayed` | `Relayed { items }` |
 | `Grant { HostGrant }` | `Ok` |
 
@@ -488,11 +877,11 @@ The envelope has no sender field. Members find the sender through the
 session binding, and the host knows it anyway from the connection.
 
 **`/umbra/blob/1`**: `Have { ids }` returns which ones it has,
-`Get { id, offset, len }` returns bytes, and `Put { id, bytes }` returns
-`Stored` or `Rejected(Quota | TooLarge | HashMismatch)`.
+`Get { id, offset, len }` returns bytes, and `Put { id, bytes, exp_bucket? }`
+returns `Stored` or `Rejected(Quota | TooLarge | HashMismatch)`.
 
-**`/umbra/index/1`**: `Announce { listing }`, `Search { query, limit }`,
-`Get { server_id }`.
+There's no `/umbra/index/1`. Umbra doesn't do discovery (see
+[Discovery](#discovery)).
 
 **Live fan-out.** A sender pushes each envelope to its hosts and directly to
 members who are online. libp2p gossipsub was considered and left out for
@@ -505,63 +894,89 @@ Same style as `api/umbra.rs`. These are sketches, not final signatures.
 
 ```rust
 // Servers
-async fn create_server(name: String) -> Result<ServerInfo>;
-fn list_servers() -> Result<Vec<ServerInfo>>;
+async fn create_server(name: String, recovery: RecoverySetup, identity: IdentityChoice) -> Result<ServerInfo>; // recovery required
+fn list_servers() -> Result<Vec<ServerInfo>>;  // the "Your servers" view
 async fn leave_server(server_id: String) -> Result<()>;
 fn export_owner_key(server_id: String, passphrase: String) -> Result<Vec<u8>>; // Argon2id-wrapped
 async fn import_owner_key(server_id: String, blob: Vec<u8>, passphrase: String) -> Result<()>;
 async fn transfer_ownership(server_id: String, new_owner: String /* PeerId */) -> Result<()>;
 
-// Invites
+// Invites (only roles with the invite permission)
 fn create_invite(server_id: String, opts: InviteOptions) -> Result<String>; // umbra://join?...
 fn parse_invite(link: String) -> Result<InvitePreview>;
-async fn join_server(link: String) -> Result<ServerInfo>;
+async fn join_server(link: String, identity: IdentityChoice) -> Result<ServerInfo>;
 async fn approve_join(server_id: String, peer_id: String, approve: bool) -> Result<()>;
+
+// Identity
+async fn set_server_profile(server_id: String, profile: Option<Profile>) -> Result<()>; // None = use default
 
 // Channels and messages
 async fn create_channel(server_id: String, name: String, kind: ChannelKind) -> Result<Channel>;
 fn list_channels(server_id: String) -> Result<Vec<Channel>>;
+async fn set_history_policy(server_id: String, channel_id: Option<String>, policy: HistoryPolicy) -> Result<()>;
 async fn send_channel_text(server_id: String, channel_id: String, text: String,
                            reply_to: Option<MessageId>, preview: Option<LinkPreview>) -> Result<MessageId>;
 async fn send_channel_file(server_id: String, channel_id: String, path: String,
-                           caption: Option<String>) -> Result<MessageId>;
+                           caption: Option<String>) -> Result<MessageId>; // GIFs too
+async fn send_file_ref(server_id: String, channel_id: String, file: FileRef) -> Result<MessageId>; // pack items, recent GIFs
 fn list_channel_messages(server_id: String, channel_id: String,
                          before: Option<i64>, limit: u32) -> Result<Vec<ChannelMessage>>;
 async fn fetch_file(file: FileRef, dest_path: String) -> Result<()>; // progress via events
 async fn build_link_preview(url: String) -> Result<LinkPreview>;     // sender side; Tor-aware
 
+// Packs
+async fn add_pack(server_id: String, name: String, items: Vec<String /* paths */>) -> Result<PackInfo>; // admins
+async fn remove_pack(server_id: String, pack_id: String) -> Result<()>;
+fn list_packs(server_id: String) -> Result<Vec<PackInfo>>;
+
+// Disappearing messages
+async fn set_chat_timer(peer_id: String, timer_secs: Option<u64>) -> Result<()>;
+async fn set_my_channel_timer(server_id: String, channel_id: String, timer_secs: Option<u64>) -> Result<()>;
+async fn set_channel_timer(server_id: String, channel_id: String, timer_secs: Option<u64>) -> Result<()>; // admins
+async fn set_role_max_lifetime(server_id: String, role: Role, secs: Option<u64>) -> Result<()>;           // owner
+
 // Members and moderation
 fn list_members(server_id: String) -> Result<Vec<Member>>; // handle, suffix, role, verified, lookalike
 async fn set_role(server_id: String, peer_id: String, role: Role) -> Result<()>;   // owner only
+async fn set_invite_roles(server_id: String, roles: Vec<Role>) -> Result<()>;     // owner only
 async fn kick(server_id: String, peer_id: String) -> Result<()>;
 async fn ban(server_id: String, peer_id: String) -> Result<()>;
 async fn delete_channel_message(server_id: String, id: MessageId) -> Result<()>;
+fn list_message_requests() -> Result<Vec<MessageRequest>>;
 
-// Hosting and discovery
+// Hosting and integrity
 async fn set_hosts(server_id: String, hosts: Vec<String>) -> Result<()>;
-async fn run_host(cfg: HostConfig) -> Result<()>;  // headless blind host: quota, retention
-async fn publish_listing(server_id: String, listing: ListingInput, index_addrs: Vec<String>) -> Result<()>;
-async fn search_index(index_addr: String, query: String) -> Result<Vec<ServerListing>>;
+fn host_health(server_id: String) -> Result<Vec<HostHealth>>; // open incidents, history
+async fn export_integrity_evidence(server_id: String, incident: String) -> Result<Vec<u8>>;
+// The blind host itself is the standalone `umbra-host` binary, not an app API.
 ```
 
 New `CoreEvent` variants: `ChannelMessage`, `ChannelMessageEdited`,
 `ChannelMessageDeleted`, `ServerUpdated { server_id, seq }`,
 `MemberJoined`, `MemberLeft { reason: Left | Kicked | Banned }`,
-`JoinRequest`, `KeyMissing { server_id, channel_id, count }`,
-`FileProgress`, `ManifestRollback`, `ServerForked`, and
+`JoinRequest`, `MessageRequest`, `KeyMissing { server_id, channel_id, count }`,
+`FileProgress`, `ManifestRollback`, `ServerForked`,
+`IntegrityAlert { scope, host, level, count }`, `IntegrityResolved`,
+`SenderForked`, `MessagesExpired { scope, count }`, and
 `Removed { server_id, reason }` when we're the one kicked.
 
 Store (schema v3): `servers`, `manifests`, `roster_ops`, `channels`,
-`megolm_outbound`, `megolm_inbound` (session id, server, channel, bound
-sender, first known index, forwarded-by, pickle), `channel_messages`,
-`pending_megolm`, `files`, `blobs`, and for hosts `host_envelopes` and
-`host_relay`. Megolm pickles are encrypted with
+`identities` (default plus per-server), `megolm_outbound` (with `shareable`
+and timer), `megolm_inbound` (session id, server, channel, bound sender,
+first known index, forwarded-by, confirmed, pickle), `channel_messages` (with
+`seq`, `prev`, `exp`), `heads`, `host_receipts`, `integrity_incidents`,
+`pending_megolm`, `files`, `blobs`, `packs`, `message_requests`. The
+`umbra-host` program has `host_envelopes` (indexed by `EnvHash` and
+`exp_bucket`) and `host_relay`. Megolm pickles are encrypted with
 `HKDF(db_key, "megolm-pickle-v1")`, kept separate from the Olm pickle key.
 `mock: true` should fake a server with two channels and a few members,
-including a name collision.
+including a name collision, an expired message and one open integrity
+incident.
 
 ## UI notes (for Copilot)
 
+- **Entry points:** Join (paste or scan an invite), Create, and Your servers.
+  No browse or search screen.
 - **Layout:** a server rail, channel list, message pane and member list,
   with role badges from the manifest.
 - **Names:** show the suffix only on collision, in muted type after the
@@ -569,54 +984,73 @@ including a name collision.
   staff with a warning. Never use the suffix to decide trust.
 - **Join preview:** server name, owner fingerprint, the inviter (and their
   safety number if they're a contact), which hosts it uses and whether
-  they're blind or member hosts, and the history policy. On public servers,
-  say "Anyone who joins can read this server."
+  they're blind or member hosts, the history policy, and which identity
+  you'll join as (default, with a profile, or a separate one).
+- **History label:** "New members can read history" in the header and above
+  the composer of `shared` channels.
+- **Invites:** the invite button only appears for roles with the permission.
 - **Host badge:** member hosts show "Host, can read everything".
+- **Host health:** an amber dot on the host badge while an incident is open,
+  a health page in server settings, at most one notification per host per
+  day, and blocking banners only for critical incidents and forks.
 - **Undecryptable messages:** "Waiting for this message's key." Before your
-  join: "Messages from before you joined aren't available."
+  join in a `from_join` channel: "Messages from before you joined aren't
+  available."
+- **Disappearing messages:** a timer icon on the chat or channel, inline
+  notices for timer changes, "N messages expired" markers, and the honest
+  warning when turning a timer on.
+- **Message requests:** DMs from co-members who aren't contacts go to a
+  separate requests list.
 - **Removed:** if you're kicked or banned, the server goes read-only with an
   explanation. Your history stays on the device unless you delete it.
 - **Files:** show the size limit before upload, strip EXIF by default, don't
   auto-download over the threshold, and decode images off the UI isolate.
+- **GIFs:** a picker over the device gallery, recent GIFs and the server's
+  packs. No search box.
 - **Previews:** a setting with a short privacy note. In Tor mode, "Previews
   are fetched through Tor" or "off".
-- **GIF search:** off by default. Turning it on shows the provider's name
-  and what it learns.
 - **Forks and rollbacks** get a blocking banner, not a toast.
 
 ## Threat model deltas
 
 New assets: server membership (who's in which server), server content, the
-owner and recovery keys, and Megolm sessions.
+owner and recovery keys, Megolm sessions, and the completeness of stored
+history.
 
 | Threat | Mitigation | What's left |
 | --- | --- | --- |
 | Host, relay or network reads content | Megolm inside Olm-shared keys. Blind hosts never get session keys | A member host reads everything, by definition |
-| Host learns metadata | Random `ChannelId`s, no sender field in envelopes, padding | The host sees member PeerIds, IPs, timing, sizes and who posts. Tor hides IPs only |
+| Host learns metadata | Random `ChannelId`s, no sender field in envelopes, padding | The host sees member PeerIds, IPs, timing, sizes, coarse expiry and who posts. Tor hides IPs only |
+| Host drops, withholds or splits history | Hash chains, signed heads, host receipts, self-audit and cross-checks raise alerts | Detection only, not availability. A host that's every member's only path can hide what others were shown |
+| Host purges early and calls it expiry | The expiry is in the signed plaintext | None. It's alerted like any drop |
+| Host keeps data after expiry or deletion | None possible | Undetectable. Only an honest host purges |
 | Member impersonates another member | Session binding from Olm, Megolm signatures, v2 cards | Display-name impersonation, handled by badges and lookalike warnings, not by the suffix |
-| Sender shows different content to different members | None. Megolm has no transcript consistency, and Matrix has the same gap | Fan-out through hosts makes it harder, but a sender can still send different envelopes directly |
+| Forged history forwarded to a new member | Forwards marked "forwarded by X" and checked against the sender's signed heads | Unconfirmed until a head from the sender arrives |
+| Sender shows different content to different members | Hash chains and cross-checked heads now reveal it as a sender fork | Detected after the fact, not prevented |
 | Removed member reads new messages | Rotation on leave, kick or ban, and removal from the host ACL | They keep everything they already had, and a member who's slow to rotate leaks until they do |
-| Compromised member device | Periodic rotation | No post-compromise security until the next rotation |
+| New member reads earlier history | It's the default (Nyx). `from_join` per server or channel, labels in the UI, expired messages never shared | Anyone admitted reads the window. A leaked invite exposes it. Old keys stay on devices for forwarding |
+| Stranger joins | Every server is invite-only, invites are authorized-only, single use and 7 days by default, approval mode | An invite is a bearer secret until used. Ban evasion with a new identity needs a new invite |
+| Compromised member device | Periodic rotation | No post-compromise security until the next rotation, and the shared-history window's keys |
 | Rolled-back manifest un-bans someone | `seq` and `prev` checks | A client that has never seen the newer manifest will accept the older one |
-| Owner key stolen | Recovery keys, fork detection | No recovery keys means the server is lost |
-| Public-server lurkers | None. This is by design | Spell it out in the UI |
-| Index or rendezvous learns who announces and searches | Opt-in, Tor | High on clearnet |
+| Owner key stolen or lost | Required recovery keys, fork detection | If the recovery keys go too, the server is lost |
 | Fetching files shows IP | Hosts in Tor mode, no auto-download | Whoever serves the chunks sees your IP on clearnet |
-| Receivers leak IP through embeds or GIFs | Built by the sender, receivers never fetch | Sender's IP goes to the site unless they're on Tor |
+| Receivers leak IP through embeds or GIFs | Built by the sender, GIFs are files, no GIF provider | Sender's IP goes to the site for previews unless they're on Tor |
 | Malicious files or images | Size caps, hash checks before decrypting, decoding off the UI isolate | Image and video decoders run on attacker input, so keep them sandboxed and up to date |
-| Same PeerId in every server | None | Members of different servers can link you. Per-server identities are an open question |
+| Recipient keeps disappearing messages | Clients delete at expiry, honest warning in the UI | Screenshots, copies and modified clients. Best effort only |
+| Same identity in every server | Per-server profiles change names; separate identities per server unlink keys | The default identity is linkable across servers. Separate identities still link through IP on clearnet and timing |
 
 ### Abuse and spam
 
-| Vector | Limit (all proposed) |
+| Vector | Limit (all proposed unless marked) |
 | --- | --- |
 | Posting | Per member: burst 5, then 1 every 2 s, enforced by hosts and honest clients. Slow mode in policy |
 | New members | No files or links for the first 24 h, if policy turns it on |
-| Joins | Invites expire and have max uses, approval mode is optional, and `JoinHello` is token-bucketed per PeerId like `Hello` |
-| Key requests and shares | Per-member token bucket. Shares from non-roster peers are dropped |
+| Joins | Invite-only and authorized-only (decided). Invites expire and have max uses, approval mode is optional, and `JoinHello` is token-bucketed per PeerId like `Hello` |
+| DMs from co-members | Message requests (decided), collapsed, token-bucketed |
+| Key requests, shares and forwards | Per-member token bucket. Shares from non-roster peers are dropped |
+| Heads and digests | Per-member token bucket. Heads from non-roster peers are dropped |
 | Junk envelopes | Pending queue capped at 500 per server. Unknown sessions from non-members are dropped |
-| Storage | Per-server host quota, 30-day retention, 100 MiB file cap |
-| Sybils in public servers | Invites are the gate. Proof-of-work to join is an open question |
+| Storage | Per-server host quota, 30-day host retention (decided), 100 MiB file cap (decided), 250 members (decided) |
 
 ### New invariants
 
@@ -629,15 +1063,20 @@ owner and recovery keys, and Megolm sessions.
 | S5 | A client never accepts a manifest with a lower `seq` than the highest it has seen |
 | S6 | Receivers never fetch a third-party URL for an embed or GIF |
 | S7 | File chunks are checked against their `BlobId` before decrypting, and fail closed |
+| S8 | An invite, `JoinHello` or `Admit` is only accepted if its signer's role has the `invite` permission in the manifest it names |
+| S9 | Exported session keys are only forwarded from sessions created under a `shared` policy, to current roster members, and never for expired messages |
+| S10 | A missing item is shown as expected only if a signed expiry, retention window, deletion or join window explains it. Anything else is an integrity alert |
+| S11 | Expired content is removed from the message store, attachments, search index and outbox, and its keys are dropped once nothing alive needs them |
 
 ## Phasing
 
 | Phase | Scope | Needs |
 | --- | --- | --- |
-| 0 | Card v2 (`ik` signed by `ed`), co-member trust class, outbox generalisation | Elite |
-| 1 | Servers, text channels, invites, roles, kick and ban, rotation, blind hosts, files | Elite (core), Copilot (UI), Val (onion hosts once `tor-listen` is stable) |
-| 2 | Link previews, GIF upload and optional search, public listings and index nodes | Elite, Copilot |
+| 0 | Card v2 (`ik` signed by `ed`), co-member trust class with message requests, outbox generalisation, `Payload` v2 (`seq`, `prev`, `skipped`, `exp`) | Elite |
+| 1 | Servers, text channels, authorized-only invites, roles, kick and ban, required recovery keys, rotation, history sharing (on by default, configurable), the standalone `umbra-host` blind host, files and GIFs as files, per-server profiles. **Host sanity checks:** hash chains, heads, host receipts, self-audit, cross-checks, alerts and the host health page for channels, DMs and the outbox. **Disappearing messages** for DMs and channels, with role policies | Elite (core and `umbra-host`), Copilot (UI), Sally (packaging `umbra-host`), Val (onion hosts once `tor-listen` is stable) |
+| 2 | Link previews, server sticker and GIF packs, separate identities per server, integrity evidence export | Elite, Copilot |
 | 3 | Voice channels | Gem |
+| Not planned | Public servers, an Umbra-run directory or bootstrap, GIF providers. User-added directories are a proposed extension pending Nyx | |
 
 **Voice (phase 3, with Gem).** Today's calls are 1:1 flutter_webrtc with SDP
 inside Olm signals. For groups there are two options:
@@ -654,22 +1093,35 @@ inside Olm signals. For groups there are two options:
 
 ## Open questions for Nyx
 
-1. **Hosts:** should we ship a headless blind-host build (Linux binary or
-   container), or leave hosting to members' desktop apps that stay open?
-2. **Public servers in v1?** They need the "anyone who joins can read"
-   warning and the index. Otherwise everything's invite-only to start.
-3. **Index:** does Umbra run a default index, or none, so the user has to add
-   one? (The bootstrap and relay nodes have the same open question.)
-4. **History default:** `joined` (proposed) or `shared`?
-5. **Limits:** is a 250-member cap, 100 MiB files and 30-day host retention
-   OK for v1?
-6. **DMs from server members** who aren't contacts: allowed, shown as message
-   requests, or off?
-7. **Identity across servers:** keep one device PeerId everywhere (simple, but
-   linkable), or use per-server identities (more work in core)?
-8. **GIF provider:** which one, if any, and who holds the API key? Embedding a
-   key in an AGPL binary makes it public.
-9. **Owner recovery:** should recovery keys be required at server creation,
-   or optional?
+1. ~~**Hosts:** headless blind-host build, or members' desktop apps?~~
+   **Decided:** a standalone headless program (`umbra-host`).
+2. ~~**Public servers in v1?**~~ **Decided (Nyx):** no public servers. Every
+   server is invite-only, and invites are authorized-only (owner and admins by
+   default).
+3. ~~**Index:** a default index, or none?~~ **Decided (Nyx):** Umbra runs no
+   directory or bootstrap, and the app only joins, creates and shows your
+   servers. **Still open:** whether to add the proposed user-added directories
+   extension.
+4. **History default.** Decided as **on by default, configurable per server
+   and per channel**, with "history from join" as the alternative, as Nyx
+   said. **Confirm with Nyx**, because a later relayed decision said
+   otherwise.
+5. ~~**Limits:** 250 members, 100 MiB files, 30-day host retention?~~
+   **Decided:** yes. The 30 days is host ciphertext retention.
+6. ~~**DMs from server members** who aren't contacts?~~ **Decided:** they
+   arrive as message requests.
+7. **Identity across servers.** Decided as **a default identity that users can
+   customise per server**, with a separate identity per server as an option,
+   as Nyx said. **Confirm with Nyx**, because a later relayed decision said
+   otherwise.
+8. ~~**GIF provider?**~~ **Decided (Nyx):** none at launch. GIFs are encrypted
+   file attachments, plus server packs. No API key and no external search.
+9. ~~**Owner recovery:** required or optional?~~ **Decided:** required at
+   server creation.
 10. **Legal:** host operators store ciphertext they can't read, for people
-    they may not know. [legal.md](legal.md) doesn't cover that yet.
+    they may not know, and now purge on expiry. [legal.md](legal.md) doesn't
+    cover that yet. **Open, pending Syd's review.**
+11. **New: disappearing timer start.** This doc counts from sending, so hosts
+    and the integrity checks share one expiry. Signal counts from reading on
+    the recipient's side. A local "from reading" timer on top is possible.
+    Is counting from sending OK?

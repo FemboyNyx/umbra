@@ -71,14 +71,15 @@ with messages after they're decrypted.
 | A flood of contact requests | Non-contacts can't claim keys or have messages decrypted | Unlimited `ContactRequest` events. **(app)** needs a rate limit or collapse repeats, and core should rate-limit per PeerId |
 | Eclipse or Sybil attacks on the DHT | Contacts' addresses from cards and `Hello` don't depend on the DHT | A determined attacker can hide peers that have moved |
 | A relay operator drops traffic | Several `relay_addrs` can be used | Tor-only users depend on relays to be reachable at all |
-| Undelivered messages | Outbox with ordered retries | Messages expire after 7 days. **(app)** has to show expired messages as failed |
+| Undelivered messages | Outbox with ordered retries | Messages expire after 7 days. **(app)** has to show expired messages as failed. The receiver isn't told today; [servers.md](servers.md#dms-and-the-outbox) proposes `Payload` v2 with `seq`, `prev` and `skipped` so gaps are visible |
+| A host drops or withholds stored data (servers, not built yet) | Designed in [servers.md](servers.md#host-sanity-checks): hash chains, signed heads, host receipts and cross-checks raise alerts | Detection only. A host can still deny service, and can keep data past expiry without anyone knowing |
 
 ### The device
 
 | Threat | Mitigation in code | What's left |
 | --- | --- | --- |
 | A stolen or seized locked device | SQLCipher database, plus pickles encrypted with an HKDF-derived key | Only as strong as the OS keystore that holds `db_key` **(app)**. Linux without Secret Service needs a passphrase fallback (Argon2id) |
-| A stolen unlocked device | None in core | **(app)**: optional app lock. Disappearing messages are on the list |
+| A stolen unlocked device | None in core | **(app)**: optional app lock. Disappearing messages are designed in [servers.md](servers.md#disappearing-messages) (best effort: recipients can still screenshot, copy or run a modified client) |
 | Backups copy the database | The database is encrypted | **(app)**: Android `allowBackup="false"` and data extraction rules, so `db_key` and the database aren't backed up together |
 | Keys left in memory | `Zeroizing` on the `db_key` pragma, device key bytes, and the pickle key | The Olm account and sessions are in memory while running. Dart strings with plaintext can't be wiped |
 | Plaintext in logs | Core logs PeerIds and events, not message bodies | Needs a check that no `Debug` print of a `Payload` reaches logs |
@@ -90,6 +91,13 @@ with messages after they're decrypted.
 | A malicious dependency | `Cargo.lock` committed, CI builds with `--locked`, frb pinned to `=2.13.0` | Transitive dependencies are large (libp2p, arti). Adding `cargo audit` and `cargo deny` to CI is recommended |
 | A CI compromise or leaked secrets | Signing secrets only in GitHub secrets, release builds only on tags | Pinning third-party actions to commit SHAs is recommended |
 | Tampered downloads | `SHA256SUMS` on releases, Android APK signing | Unsigned checksums. Signing them (minisign or Sigstore) is recommended |
+
+## Community servers
+
+Servers (Megolm groups, hosts, invites, history sharing, host sanity checks
+and disappearing messages) are design only. Their threats and invariants
+S1 to S11 are in [servers.md](servers.md#threat-model-deltas), and they get
+merged here once core implements them.
 
 ## Security invariants
 
