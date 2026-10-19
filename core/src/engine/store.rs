@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 use crate::api::types::{Contact, ConversationSummary, DeliveryStatus, Message};
 use crate::engine::proto::EnvelopeMeta;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -81,11 +81,50 @@ CREATE TABLE IF NOT EXISTS co_members (
     PRIMARY KEY (server_id, peer_id)
 );
 CREATE INDEX IF NOT EXISTS co_members_peer ON co_members(peer_id);
+-- v4: anti-replay (docs/message-protection.md#anti-replay).
+-- Every (Megolm session, message index) accepted, until the session goes.
+CREATE TABLE IF NOT EXISTS group_seen (
+    session_id TEXT NOT NULL,
+    msg_index  INTEGER NOT NULL,
+    PRIMARY KEY (session_id, msg_index)
+) WITHOUT ROWID;
+-- Recent (stream, sender, seq) accepted, with a digest of the content so a
+-- reused seq with different content shows up as a fork. The highest seq per
+-- (stream, sender) is always kept.
+CREATE TABLE IF NOT EXISTS seq_seen (
+    stream TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    seq    INTEGER NOT NULL,
+    digest BLOB NOT NULL,
+    PRIMARY KEY (stream, sender, seq)
+) WITHOUT ROWID;
+-- Our own next outgoing seq per stream (e.g. 'dm:<peer>').
+CREATE TABLE IF NOT EXISTS seq_out (
+    stream TEXT PRIMARY KEY,
+    next   INTEGER NOT NULL
+);
 "#;
 
 pub struct Store {
     conn: Mutex<Connection>,
 }
+
+/// Outcome of checking a `(stream, sender, seq)` against what was accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeqVerdict {
+    /// Above everything seen: accept (and [`Store::seq_commit`] it).
+    Fresh,
+    /// Same seq, same content: a retransmission. Ack, don't deliver again.
+    Duplicate,
+    /// Same seq, different content: the sender forked (or was rolled back).
+    Fork,
+    /// At or below the highest seq seen and not a known duplicate: a replay.
+    Stale,
+}
+
+/// `seq_seen` rows kept per (stream, sender) besides the highest.
+pub const SEQ_SEEN_KEEP: i64 = 1024;
+const META_SEQ_FLOOR: &str = "seq_floor";
 
 #[derive(Debug, Clone)]
 pub struct SessionRow {
@@ -820,6 +859,163 @@ impl Store {
         Ok(out)
     }
 
+    // ---- anti-replay ----
+
+    /// Record a Megolm `(session_id, index)`. `false` if it was already
+    /// accepted (a replay).
+    pub fn group_seen_record(&self, session_id: &str, index: u32) -> Result<bool> {
+        Ok(self.c().execute(
+            "INSERT OR IGNORE INTO group_seen(session_id, msg_index) VALUES (?1, ?2)",
+            params![session_id, index],
+        )? == 1)
+    }
+
+    /// Drop the replay record of a discarded group session.
+    pub fn group_seen_forget(&self, session_id: &str) -> Result<()> {
+        self.c()
+            .execute("DELETE FROM group_seen WHERE session_id = ?1", [session_id])?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn group_seen_count(&self, session_id: &str) -> Result<i64> {
+        Ok(self.c().query_row(
+            "SELECT COUNT(*) FROM group_seen WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Check a `(stream, sender, seq)` without recording it.
+    pub fn seq_check(
+        &self,
+        stream: &str,
+        sender: &str,
+        seq: u64,
+        digest: &[u8],
+    ) -> Result<SeqVerdict> {
+        let c = self.c();
+        let seq = i64::try_from(seq).map_err(|_| anyhow!("seq out of range"))?;
+        let same: Option<Vec<u8>> = c
+            .query_row(
+                "SELECT digest FROM seq_seen WHERE stream = ?1 AND sender = ?2 AND seq = ?3",
+                params![stream, sender, seq],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(d) = same {
+            return Ok(if d == digest {
+                SeqVerdict::Duplicate
+            } else {
+                SeqVerdict::Fork
+            });
+        }
+        let max: Option<i64> = c.query_row(
+            "SELECT MAX(seq) FROM seq_seen WHERE stream = ?1 AND sender = ?2",
+            params![stream, sender],
+            |r| r.get(0),
+        )?;
+        Ok(match max {
+            Some(m) if seq <= m => SeqVerdict::Stale,
+            _ => SeqVerdict::Fresh,
+        })
+    }
+
+    /// Record an accepted `(stream, sender, seq)`, keeping the most recent
+    /// [`SEQ_SEEN_KEEP`] per (stream, sender).
+    pub fn seq_commit(&self, stream: &str, sender: &str, seq: u64, digest: &[u8]) -> Result<()> {
+        let seq = i64::try_from(seq).map_err(|_| anyhow!("seq out of range"))?;
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO seq_seen(stream, sender, seq, digest) VALUES (?1, ?2, ?3, ?4)",
+            params![stream, sender, seq, digest],
+        )?;
+        tx.execute(
+            "DELETE FROM seq_seen WHERE stream = ?1 AND sender = ?2 AND seq NOT IN
+               (SELECT seq FROM seq_seen WHERE stream = ?1 AND sender = ?2 ORDER BY seq DESC LIMIT ?3)",
+            params![stream, sender, SEQ_SEEN_KEEP],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop every seq record of `stream` (e.g. a server we left).
+    pub fn seq_forget_stream(&self, stream: &str) -> Result<()> {
+        self.c()
+            .execute("DELETE FROM seq_seen WHERE stream = ?1", [stream])?;
+        Ok(())
+    }
+
+    /// Take our next outgoing seq on `stream`. Starts at 1, and never below
+    /// the floor set by [`Self::seq_jump_all`].
+    pub fn seq_next(&self, stream: &str) -> Result<u64> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let floor = meta_i64(&tx, META_SEQ_FLOOR)?.unwrap_or(0);
+        let cur: Option<i64> = tx
+            .query_row(
+                "SELECT next FROM seq_out WHERE stream = ?1",
+                [stream],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let n = cur.unwrap_or(1).max(floor + 1).max(1);
+        tx.execute(
+            "INSERT INTO seq_out(stream, next) VALUES (?1, ?2)
+             ON CONFLICT(stream) DO UPDATE SET next = excluded.next",
+            params![stream, n + 1],
+        )?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    /// Jump one outgoing stream forward by `gap` (a peer saw higher seqs
+    /// from us than we remember).
+    pub fn seq_jump(&self, stream: &str, gap: u64) -> Result<()> {
+        let gap = i64::try_from(gap).map_err(|_| anyhow!("gap out of range"))?;
+        self.c().execute(
+            "INSERT INTO seq_out(stream, next) VALUES (?1, ?2 + 1)
+             ON CONFLICT(stream) DO UPDATE SET next = next + ?2",
+            params![stream, gap],
+        )?;
+        Ok(())
+    }
+
+    /// Jump every outgoing stream, and the floor for streams not seen yet,
+    /// forward by `gap` (after a restore).
+    pub fn seq_jump_all(&self, gap: u64) -> Result<()> {
+        let gap = i64::try_from(gap).map_err(|_| anyhow!("gap out of range"))?;
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute("UPDATE seq_out SET next = next + ?1", [gap])?;
+        let floor = meta_i64(&tx, META_SEQ_FLOOR)?.unwrap_or(0) + gap;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![META_SEQ_FLOOR, floor.to_string().into_bytes()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Give a queued item a new seq (outbox row and, for DMs, the message).
+    pub fn outbox_set_seq(&self, msg_id: &str, seq: u64) -> Result<()> {
+        let seq = i64::try_from(seq).map_err(|_| anyhow!("seq out of range"))?;
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute(
+            "UPDATE outbox SET seq = ?2 WHERE msg_id = ?1",
+            params![msg_id, seq],
+        )?;
+        tx.execute(
+            "UPDATE messages SET seq = ?2 WHERE id = ?1",
+            params![msg_id, seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---- outbox ----
 
     /// Queue a DM (text in `messages`).
@@ -920,6 +1116,17 @@ impl Store {
         tx.commit()?;
         Ok(rows)
     }
+}
+
+fn meta_i64(c: &Connection, key: &str) -> Result<Option<i64>> {
+    Ok(
+        c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
+        .optional()?
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok()),
+    )
 }
 
 /// v2 columns on `contacts` (key-change tracking).
@@ -1300,5 +1507,30 @@ mod tests {
         assert!(s.get_contact("p1").unwrap().is_none());
         assert!(s.list_messages("p1", None, 10).unwrap().is_empty());
         assert!(s.sessions_for("p1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn seq_counters_floor_and_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("db"), &KEY).unwrap();
+        assert_eq!(s.seq_next("dm:a").unwrap(), 1);
+        assert_eq!(s.seq_next("dm:a").unwrap(), 2);
+        s.seq_jump("dm:a", 100).unwrap();
+        assert_eq!(s.seq_next("dm:a").unwrap(), 103);
+        s.seq_jump_all(1000).unwrap();
+        assert_eq!(s.seq_next("dm:a").unwrap(), 1104);
+        // New streams start above the floor too.
+        assert_eq!(s.seq_next("dm:b").unwrap(), 1001);
+        // Only the most recent SEQ_SEEN_KEEP are kept; the highest stays.
+        for i in 1..=(SEQ_SEEN_KEEP as u64 + 10) {
+            assert_eq!(s.seq_check("dm", "p", i, b"d").unwrap(), SeqVerdict::Fresh);
+            s.seq_commit("dm", "p", i, b"d").unwrap();
+        }
+        assert_eq!(s.seq_check("dm", "p", 1, b"d").unwrap(), SeqVerdict::Stale);
+        assert_eq!(
+            s.seq_check("dm", "p", SEQ_SEEN_KEEP as u64 + 10, b"d")
+                .unwrap(),
+            SeqVerdict::Duplicate
+        );
     }
 }

@@ -265,15 +265,60 @@ struct EnvelopeMeta { seq: Option<u64>, prev: Option<String>, expires_at: Option
   ignore them (serde skips unknown fields), and future unknown fields are
   ignored too. Core stores them with queued items (`outbox.seq / prev_hash /
   expires_at`) and with received DMs (`messages.seq / prev_hash /
-  expires_at`), and passes them on in `ServerInbound.meta`. **Phase 0 doesn't
-  interpret them**: it doesn't number DMs, check chains, or delete expired
-  messages. A `prev` over 128 chars is `Rejected(Malformed)`. They aren't in
-  the FFI `Message` type yet.
+  expires_at`), and passes them on in `ServerInbound.meta`. Core numbers
+  outgoing DMs with `seq` and checks incoming DM `seq` (see *Anti-replay*
+  below); it doesn't check `prev` chains or delete expired messages yet
+  (Phase 1). A `prev` over 128 chars is `Rejected(Malformed)`. They aren't
+  in the FFI `Message` type yet.
 * Schema v3 (migrated in one transaction, columns added only if missing):
   `contacts.card_sig / pending_card_sig`, the tables `server_memberships`
   and `co_members`, `outbox.kind / server_id / payload / seq / prev_hash /
   expires_at / local_identity`, and `messages.seq / prev_hash / expires_at`.
-  servers.md's Phase 1 tables ("schema v3" there) will be v4.
+  Schema v4 adds the anti-replay tables `group_seen`, `seq_seen` and
+  `seq_out` (new tables only). servers.md's Phase 1 tables ("schema v3"
+  there) will be v5.
+
+### Anti-replay (Phase 0, [message-protection.md](message-protection.md#anti-replay))
+
+```rust
+fn accept_group_message(&self, session_id: &str, message_index: u32) -> Result<bool>;
+fn discard_group_session(&self, session_id: &str) -> Result<()>;
+fn check_sequence(&self, stream: &str, sender: &str, seq: u64, digest: &[u8]) -> Result<SeqVerdict>;
+enum SeqVerdict { Fresh, Duplicate, Fork, Stale }
+```
+
+* **Megolm** (hook only; Phase 0 has no group sessions): vodozemac's
+  `InboundGroupSession::decrypt` re-decrypts any index, so Phase 1 must call
+  `accept_group_message` after decrypting and before delivering. It records
+  `(session_id, message_index)` persistently (table `group_seen`) and returns
+  `false` for a replay. `discard_group_session` prunes the record when the
+  session is deleted.
+* **DMs**: `send_text` gives every DM a per-peer `seq` (1, 2, 3, ...; stream
+  `dm:<peer>` in `seq_out`), stored with the message and the outbox row.
+  On receipt, a DM with a `seq`:
+  * above everything seen from that peer is delivered and recorded;
+  * equal to a recorded one with the same content (SHA-256 of id, ts and
+    body) is a retransmission: acked `Delivered`, not delivered again;
+  * equal to a recorded one with different content is a **sender fork** (or
+    the sender's state was rolled back): logged at warn and
+    `Rejected(Replayed)`;
+  * otherwise at or below the highest seen is a replay: `Rejected(Replayed)`.
+
+  The last 1024 seqs per peer are kept, plus the highest. DMs without `seq`
+  (older cores) keep the `MessageId` dedupe only. The records survive
+  `remove_contact`, so a re-added peer's old messages can't be replayed in.
+* **A sender told `Rejected(Replayed)`** for a DM concludes the peer saw
+  higher seqs from it than it remembers (its state was rolled back, defence 1
+  of message-protection.md's anti-rollback): it drops its Olm sessions with
+  that peer (the next message starts a fresh pre-key session), jumps that
+  stream forward by `SEQ_RESTORE_GAP` (2^20), renumbers its queued DMs and
+  resends, once per message per flush.
+* **Other streams** (server channels, Phase 1) use `check_sequence` with a
+  stream name of their choice; `Fresh` is recorded. Server payloads are not
+  checked by core in Phase 0, since their `seq` is per channel and the
+  channel is inside the opaque data.
+* **Olm** needs nothing more: a replayed Olm message fails to decrypt. Call
+  signals carry no `seq`; `call_id` dedupe in `calls/` covers the rest.
 
 ## Messaging
 
@@ -376,7 +421,9 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
 * **`/umbra/msg/1`** (CBOR): `Hello { card }` (once per connection) or
   `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
   `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch |
-  RateLimited | NotAMember)`.
+  RateLimited | NotAMember | Replayed)`. (Older cores can't decode
+  `Replayed`; only new cores send it, and only for payloads carrying `seq`,
+  which only new cores send.)
   Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal | Server,
   seq?, prev?, expires_at?}`; `to` must be
   the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per

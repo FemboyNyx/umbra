@@ -47,6 +47,10 @@ pub enum RejectReason {
     /// Server-scoped payload from a peer that is not a co-member of that
     /// server, or whose key for it is unresolved or unsigned.
     NotAMember,
+    /// The payload's `seq` is at or below one already accepted from the
+    /// sender (a replay, or the sender's state was rolled back). The sender
+    /// should jump its sequence numbers and start a fresh session.
+    Replayed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

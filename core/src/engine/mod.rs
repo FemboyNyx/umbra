@@ -5,6 +5,7 @@ pub mod limits;
 pub mod net;
 pub mod proto;
 pub mod qr;
+pub mod replay;
 pub mod safety;
 pub mod servers;
 pub mod socks;

@@ -19,8 +19,9 @@ use crate::engine::events::EventHub;
 use crate::engine::limits::{KeyedBuckets, Limits, TokenBucket};
 use crate::engine::net::{self, NetConfig, NetHandle, TransportMode};
 use crate::engine::proto::*;
+use crate::engine::replay::{dm_out_stream, payload_digest, DM_STREAM, SEQ_RESTORE_GAP};
 use crate::engine::servers::*;
-use crate::engine::store::{CoMemberRow, ContactRow, MembershipRow, OutboxItem, Store};
+use crate::engine::store::{CoMemberRow, ContactRow, MembershipRow, OutboxItem, SeqVerdict, Store};
 use crate::engine::util::{b64, now_ms, unb64};
 use crate::engine::{qr, safety};
 
@@ -133,6 +134,8 @@ impl Limiter {
 enum DeliverError {
     /// Recipient has not accepted us yet: stop and wait for their Hello.
     NotAContact,
+    /// The peer already saw this `seq` from us: our state is behind.
+    Replayed,
     /// Transient (offline, timeout, ...): keep in the outbox.
     Retry(anyhow::Error),
 }
@@ -778,8 +781,13 @@ impl Core {
             status: DeliveryStatus::Sent,
             read: true,
         };
-        self.store.insert_message(&msg)?;
-        self.store.outbox_add(&msg.id, peer_id, now)?;
+        let meta = EnvelopeMeta {
+            seq: Some(self.store.seq_next(&dm_out_stream(peer_id))?),
+            ..Default::default()
+        };
+        self.store.insert_message_with_meta(&msg, &meta)?;
+        self.store
+            .outbox_add_item(&msg.id, peer_id, now, &OutboxItem::Dm, &meta, "default")?;
         self.events.emit(CoreEvent::MessageStatus {
             id: msg.id.clone(),
             peer_id: msg.peer_id.clone(),
@@ -841,6 +849,7 @@ impl Core {
                 Err(DeliverError::NotAContact) => {
                     Err(anyhow!("peer has not accepted you as a contact yet"))
                 }
+                Err(DeliverError::Replayed) => Err(anyhow!("peer rejected the signal as a replay")),
                 Err(DeliverError::Retry(e)) => Err(e.context("peer unreachable")),
             }
         };
@@ -1280,16 +1289,44 @@ impl Core {
                 if text.len() > MAX_TEXT_BYTES {
                     return Ok(MsgResponse::Rejected(RejectReason::Malformed));
                 }
+                let seen = match meta.seq {
+                    None => None, // older sender: MessageId dedupe only
+                    Some(seq) => {
+                        let digest = payload_digest(&Payload::new(
+                            String::new(),
+                            p.id.clone(),
+                            p.ts,
+                            PayloadBody::Text { text: text.clone() },
+                            EnvelopeMeta::default(),
+                        ));
+                        match self.store.seq_check(DM_STREAM, &pid, seq, &digest)? {
+                            SeqVerdict::Fresh => Some((seq, digest)),
+                            SeqVerdict::Duplicate => return Ok(MsgResponse::Delivered),
+                            SeqVerdict::Fork => {
+                                tracing::warn!(%peer, seq, "DM seq reused with different content (sender fork or rollback)");
+                                return Ok(MsgResponse::Rejected(RejectReason::Replayed));
+                            }
+                            SeqVerdict::Stale => {
+                                tracing::info!(%peer, seq, "dropping replayed DM seq");
+                                return Ok(MsgResponse::Rejected(RejectReason::Replayed));
+                            }
+                        }
+                    }
+                };
                 let m = Message {
                     id: p.id,
-                    peer_id: pid,
+                    peer_id: pid.clone(),
                     outgoing: false,
                     body: text,
                     timestamp_ms: p.ts,
                     status: DeliveryStatus::Received,
                     read: false,
                 };
-                if self.store.insert_message_with_meta(&m, &meta)? {
+                let fresh = self.store.insert_message_with_meta(&m, &meta)?;
+                if let Some((seq, digest)) = seen {
+                    self.store.seq_commit(DM_STREAM, &pid, seq, &digest)?;
+                }
+                if fresh {
                     self.events.emit(CoreEvent::MessageReceived { message: m });
                 }
             }
@@ -1456,6 +1493,9 @@ impl Core {
                 MsgResponse::Rejected(RejectReason::NotAContact) => {
                     return Err(DeliverError::NotAContact)
                 }
+                MsgResponse::Rejected(RejectReason::Replayed) => {
+                    return Err(DeliverError::Replayed)
+                }
                 MsgResponse::Rejected(RejectReason::DecryptFailed) => {
                     tracing::info!(%peer, "peer could not decrypt; starting a new Olm session");
                     self.crypto.forget_sessions(&contact.peer_id)?;
@@ -1486,7 +1526,8 @@ impl Core {
         if let Err(e) = self.greet(&net, peer).await {
             return Err(e.context("hello failed"));
         }
-        loop {
+        let mut jumped = std::collections::HashSet::new();
+        'outer: loop {
             let rows = self.store.outbox_for(&pid)?;
             if rows.is_empty() {
                 return Ok(());
@@ -1545,6 +1586,28 @@ impl Core {
                         }
                     }
                     Err(DeliverError::NotAContact) => return Ok(()),
+                    Err(DeliverError::Replayed)
+                        if row.item == OutboxItem::Dm && jumped.insert(row.msg_id.clone()) =>
+                    {
+                        // The peer saw this seq from us before: our state
+                        // was rolled back (message-protection.md, anti-
+                        // rollback 1). Never reuse the old session; jump the
+                        // stream past what the peer saw and resend.
+                        tracing::warn!(%peer, "peer saw a higher seq from us; jumping and re-keying");
+                        let stream = dm_out_stream(&pid);
+                        self.crypto.forget_sessions(&pid)?;
+                        self.store.seq_jump(&stream, SEQ_RESTORE_GAP)?;
+                        for r in self.store.outbox_for(&pid)? {
+                            if r.item == OutboxItem::Dm {
+                                self.store
+                                    .outbox_set_seq(&r.msg_id, self.store.seq_next(&stream)?)?;
+                            }
+                        }
+                        continue 'outer;
+                    }
+                    Err(DeliverError::Replayed) => {
+                        return Err(anyhow!("peer rejected {} as a replay", row.msg_id))
+                    }
                     Err(DeliverError::Retry(e)) => return Err(e),
                 }
             }
@@ -1605,6 +1668,44 @@ impl Core {
         )?;
         self.spawn_flush(peer);
         Ok(p.id)
+    }
+
+    // ---- anti-replay hooks (message-protection.md#anti-replay) ----
+
+    /// Replay check for a decrypted group (Megolm) message: call it after
+    /// decrypting and before delivering. `true` the first time a
+    /// `(session_id, message_index)` is seen, `false` for a replay (drop it).
+    /// The record is persistent and lasts until
+    /// [`Self::discard_group_session`]. Phase 0 has no Megolm sessions; this
+    /// is the hook Phase 1 calls.
+    pub fn accept_group_message(&self, session_id: &str, message_index: u32) -> Result<bool> {
+        self.store.group_seen_record(session_id, message_index)
+    }
+
+    /// Forget a discarded group session's replay record.
+    pub fn discard_group_session(&self, session_id: &str) -> Result<()> {
+        self.store.group_seen_forget(session_id)
+    }
+
+    /// Sequence check for a non-DM stream (e.g. a server channel). `digest`
+    /// identifies the content (see `replay::payload_digest`). A `Fresh` result
+    /// is recorded; `Duplicate` means ack without delivering again; `Stale`
+    /// and `Fork` mean drop (and flag a fork). DMs are checked internally.
+    pub fn check_sequence(
+        &self,
+        stream: &str,
+        sender: &str,
+        seq: u64,
+        digest: &[u8],
+    ) -> Result<SeqVerdict> {
+        if stream == DM_STREAM {
+            bail!("the DM stream is checked by core");
+        }
+        let v = self.store.seq_check(stream, sender, seq, digest)?;
+        if v == SeqVerdict::Fresh {
+            self.store.seq_commit(stream, sender, seq, digest)?;
+        }
+        Ok(v)
     }
 }
 
@@ -2145,6 +2246,115 @@ mod tests {
             a.handle_msg(b.peer_id(), MsgRequest::Olm { t, c }),
             MsgResponse::Rejected(RejectReason::Malformed)
         );
+    }
+
+    #[tokio::test]
+    async fn dm_replays_and_forks_are_dropped() {
+        let (a, _ra, _da) = open(1);
+        let (b, _rb, _db) = open(2);
+        befriend(&a, &b).await;
+        assert!(matches!(open_session(&a, &b), KeysResponse::Key { .. }));
+        let pts = a.peer_id().to_base58();
+        let send = |id: &str, text: &str, seq: Option<u64>| {
+            let p = Payload::new(
+                pts.clone(),
+                id.into(),
+                1_000,
+                PayloadBody::Text { text: text.into() },
+                EnvelopeMeta {
+                    seq,
+                    ..Default::default()
+                },
+            );
+            let (t, c) = b
+                .crypto
+                .encrypt(&pts, &encode_payload(&p).unwrap())
+                .unwrap();
+            a.handle_msg(b.peer_id(), MsgRequest::Olm { t, c })
+        };
+        let count = || {
+            a.list_messages(&b.peer_id().to_base58(), None, 100)
+                .unwrap()
+                .len()
+        };
+        assert_eq!(send("m1", "one", Some(1)), MsgResponse::Delivered);
+        // A retransmission (same seq, same content) is acked, not re-delivered.
+        assert_eq!(send("m1", "one", Some(1)), MsgResponse::Delivered);
+        assert_eq!(count(), 1);
+        // Same seq, different content: a fork. Dropped.
+        assert_eq!(
+            send("m1b", "other", Some(1)),
+            MsgResponse::Rejected(RejectReason::Replayed)
+        );
+        assert_eq!(send("m5", "five", Some(5)), MsgResponse::Delivered);
+        // Below the highest seen and not a known message: a replay.
+        assert_eq!(
+            send("m3", "three", Some(3)),
+            MsgResponse::Rejected(RejectReason::Replayed)
+        );
+        // Senders without seq (older cores) still work, MessageId dedupe only.
+        assert_eq!(send("m9", "old", None), MsgResponse::Delivered);
+        assert_eq!(send("m9", "old", None), MsgResponse::Delivered);
+        assert_eq!(count(), 3);
+    }
+
+    #[tokio::test]
+    async fn outgoing_dms_are_numbered_per_peer() {
+        let (a, _ra, _da) = open(1);
+        let (b, _rb, _db) = open(2);
+        let (c, _rc, _dc) = open(3);
+        befriend(&a, &b).await;
+        befriend(&a, &c).await;
+        let (pb, pc) = (b.peer_id().to_base58(), c.peer_id().to_base58());
+        let seq_of = |id: &str| a.store.message_meta(id).unwrap().unwrap().seq;
+        let b1 = a.send_text(&pb, "x".into()).await.unwrap();
+        let b2 = a.send_text(&pb, "y".into()).await.unwrap();
+        let c1 = a.send_text(&pc, "z".into()).await.unwrap();
+        assert_eq!(
+            (seq_of(&b1), seq_of(&b2), seq_of(&c1)),
+            (Some(1), Some(2), Some(1))
+        );
+        let rows = a.store.outbox_for(&pb).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.meta.seq).collect::<Vec<_>>(),
+            [Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn group_replays_are_rejected_until_the_session_is_discarded() {
+        let (a, _ra, _da) = open(1);
+        assert!(a.accept_group_message("sess", 0).unwrap());
+        assert!(a.accept_group_message("sess", 1).unwrap());
+        assert!(!a.accept_group_message("sess", 0).unwrap());
+        assert!(a.accept_group_message("other", 0).unwrap());
+        assert_eq!(a.store.group_seen_count("sess").unwrap(), 2);
+        a.discard_group_session("sess").unwrap();
+        assert_eq!(a.store.group_seen_count("sess").unwrap(), 0);
+        assert!(!a.accept_group_message("other", 0).unwrap());
+        // Generic sequence hook for later phases.
+        let ch = "srv1/chan";
+        assert_eq!(
+            a.check_sequence(ch, "p", 4, b"d4").unwrap(),
+            SeqVerdict::Fresh
+        );
+        assert_eq!(
+            a.check_sequence(ch, "p", 4, b"d4").unwrap(),
+            SeqVerdict::Duplicate
+        );
+        assert_eq!(
+            a.check_sequence(ch, "p", 4, b"xx").unwrap(),
+            SeqVerdict::Fork
+        );
+        assert_eq!(
+            a.check_sequence(ch, "p", 2, b"d2").unwrap(),
+            SeqVerdict::Stale
+        );
+        assert_eq!(
+            a.check_sequence(ch, "q", 2, b"d2").unwrap(),
+            SeqVerdict::Fresh
+        );
+        assert!(a.check_sequence(DM_STREAM, "p", 9, b"d").is_err());
     }
 
     #[tokio::test]
