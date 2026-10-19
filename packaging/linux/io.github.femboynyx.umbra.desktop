@@ -10,5 +10,5 @@ Terminal=false
 Categories=Network;InstantMessaging;Chat;
 MimeType=x-scheme-handler/umbra;
 StartupNotify=true
-StartupWMClass=umbra
+StartupWMClass=io.github.femboynyx.umbra
 Keywords=chat;messenger;p2p;encrypted;secure;calls;

@@ -22,7 +22,7 @@
       Early development: not audited. Do not rely on it for high-risk use yet.
     </p>
   </description>
-  <launchable type="desktop-id">umbra.desktop</launchable>
+  <launchable type="desktop-id">io.github.femboynyx.umbra.desktop</launchable>
   <url type="homepage">https://github.com/FemboyNyx/umbra</url>
   <url type="bugtracker">https://github.com/FemboyNyx/umbra/issues</url>
   <url type="vcs-browser">https://github.com/FemboyNyx/umbra</url>

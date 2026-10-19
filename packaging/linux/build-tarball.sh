@@ -56,7 +56,8 @@ cp -a "${BUNDLE_DIR}/." "${APP_ROOT}/"
 
 # Ship desktop + metainfo next to the binary for packagers / AppImage reuse.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-install -m 0644 "${SCRIPT_DIR}/umbra.desktop" "${APP_ROOT}/umbra.desktop"
+install -m 0644 "${SCRIPT_DIR}/io.github.femboynyx.umbra.desktop" \
+  "${APP_ROOT}/io.github.femboynyx.umbra.desktop"
 install -m 0644 "${SCRIPT_DIR}/io.github.femboynyx.umbra.metainfo.xml" \
   "${APP_ROOT}/io.github.femboynyx.umbra.metainfo.xml"
 if [[ -f "${SCRIPT_DIR}/../icons/umbra-256.png" ]]; then
