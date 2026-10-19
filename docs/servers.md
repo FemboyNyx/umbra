@@ -28,9 +28,9 @@ padding, anti-replay and anti-rollback) are in
 | Membership | Owner-signed manifest with a sequence number, plus admin-signed roster ops. **Recovery keys are required** at server creation | Decided. Adds rollback and fork rules and ownership transfer |
 | Invites | **Every server is invite-only.** Invites are **authorized-only**: only roles with the `invite` permission (owner and admins by default) can create them | **(Nyx)** |
 | Public servers | **Not planned.** No public or listed servers | **(Nyx)** |
-| Discovery | **Umbra runs no directory and no bootstrap.** The app only joins (by invite), creates, and shows your servers. User-added directories are a **proposed extension**, pending Nyx | **(Nyx)**, extension pending |
-| History for new members | **On by default**: new members can read earlier history. Configurable per server and per channel. "History from join" is the alternative setting | **(Nyx)**, confirm with Nyx (see open questions) |
-| Identity | A **default identity** used across servers, which users can customise per server (per-server profile). A **separate identity per server** is an option | **(Nyx)**, confirm with Nyx (see open questions) |
+| Discovery | **Umbra runs no directory and no bootstrap.** The app only joins (by invite), creates, and shows your servers. Users can add **third-party directories** themselves (phase 2) | **(Nyx)** |
+| History for new members | **On by default**: new members can read earlier history. Configurable per server and per channel. "History from join" is the alternative setting | **Decided (Nyx)**, confirmed |
+| Identity | A **default identity** used across servers, which users can customise per server (per-server profile). A **separate identity per server** is an option | **Decided (Nyx)**, confirmed |
 | Bans | Enforced by rotation and host ACLs. A banned member keeps whatever they already decrypted or hold keys for | Agrees with Chi, with that limit stated plainly |
 | Files | Chunked, content-addressed, one key per file, fetched over a separate `/umbra/blob/1` | Agrees with Chi. Adds that fetching reveals your IP to whoever serves the chunks |
 | Limits | **250 members, 100 MiB per file, 30-day host ciphertext retention** | Decided |
@@ -914,20 +914,19 @@ anyone could join. That's gone. If it ever comes back, it needs the warning
 that end-to-end encryption doesn't protect against someone who simply joins,
 and anyone who joined could read the history window.
 
-**Proposed extension, pending Nyx: user-added directories.** A user could add
+**Decided (Nyx): user-added directories, phase 2.** A user can add
 a third-party directory address themselves. A directory would only hold
 owner-signed `ServerListing { server_id, seq, name, description, icon,
 join_hosts, expires, sig }` entries, with no member lists or contents, and
-joining through one would still be **request-to-join**, approved by a role
-with the `invite` permission, so servers stay invite-only. The costs, if
-Nyx wants it: announcing shows the directory the owner's PeerId and IP, and
+joining through one is still **request-to-join**, approved by a role
+with the `invite` permission, so servers stay invite-only. The costs: announcing shows the directory the owner's PeerId and IP, and
 searching shows the searcher's IP and query, unless they're on Tor. A
 directory can hide listings or show different people different ones, but it
-can't forge them. Nothing in phases 0 to 3 depends on this.
+can't forge them. Umbra ships no default directory; the app only offers one the user adds. Nothing in phases 0 and 1 depends on this.
 
 ## Identity across servers
 
-**Decided (Nyx), to confirm with Nyx: a default identity that users can
+**Decided (Nyx, confirmed): a default identity that users can
 customise per server.**
 
 | Option | What it is | Linkability |
@@ -1361,9 +1360,9 @@ history.
 | --- | --- | --- |
 | 0 | Card v2 (`ik` signed by `ed`), co-member trust class with message requests, outbox generalisation, `Payload` v2 (`seq`, `prev`, `skipped`, `exp`), padding and the replay record for DMs | Elite |
 | 1 | Servers, text channels, authorized-only invites, roles, kick and ban, required recovery keys, rotation, history sharing (on by default, configurable), the standalone `umbra-host` blind host **with operator duties from legal.md §4 (published contact, onboarding warnings and AUP, IP logging off by default, blob, peer and server denylists with signed refusal receipts, preservation holds, takedown notices)**, files and GIFs as files, per-server profiles. **Host sanity checks:** hash chains, heads, host receipts, self-audit, cross-checks, alerts and the host health page for channels, DMs and the outbox. **Disappearing messages** for DMs and channels, with role policies | Elite (core and `umbra-host`), Copilot (UI), Sally (packaging `umbra-host`), Val (onion hosts once `tor-listen` is stable) |
-| 2 | Link previews, server sticker and GIF packs, separate identities per server, integrity evidence export | Elite, Copilot |
+| 2 | Link previews, user-added directories (signed listings, request-to-join), server sticker and GIF packs, separate identities per server, integrity evidence export | Elite, Copilot |
 | 3 | Voice channels | Gem |
-| Not planned | Public servers, an Umbra-run directory or bootstrap, GIF providers. User-added directories are a proposed extension pending Nyx | |
+| Not planned | Public servers, an Umbra-run directory or bootstrap, GIF providers | |
 
 Device-side protections (app lock, screen security, view-once, anti-rollback, duress PIN, sealed sender) use the same phases, ranked in [message-protection.md](message-protection.md#ranked-value-versus-cost).
 
@@ -1389,30 +1388,28 @@ inside Olm signals. For groups there are two options:
    default).
 3. ~~**Index:** a default index, or none?~~ **Decided (Nyx):** Umbra runs no
    directory or bootstrap, and the app only joins, creates and shows your
-   servers. **Still open:** whether to add the proposed user-added directories
-   extension.
-4. **History default.** Decided as **on by default, configurable per server
-   and per channel**, with "history from join" as the alternative, as Nyx
-   said. **Confirm with Nyx**, because a later relayed decision said
-   otherwise.
+   servers. Users can add
+   third-party directories themselves (phase 2), joined by request only.
+4. ~~**History default.**~~ **Decided (Nyx, confirmed):** on by default,
+   configurable per server and per channel, with "history from join" as the
+   alternative setting.
 5. ~~**Limits:** 250 members, 100 MiB files, 30-day host retention?~~
    **Decided:** yes. The 30 days is host ciphertext retention.
 6. ~~**DMs from server members** who aren't contacts?~~ **Decided:** they
    arrive as message requests.
-7. **Identity across servers.** Decided as **a default identity that users can
-   customise per server**, with a separate identity per server as an option,
-   as Nyx said. **Confirm with Nyx**, because a later relayed decision said
-   otherwise.
+7. ~~**Identity across servers.**~~ **Decided (Nyx, confirmed):** a default
+   identity that users can customise per server, with a separate identity per
+   server as an option.
 8. ~~**GIF provider?**~~ **Decided (Nyx):** none at launch. GIFs are encrypted
    file attachments, plus server packs. No API key and no external search.
 9. ~~**Owner recovery:** required or optional?~~ **Decided:** required at
    server creation.
-10. **Legal:** host operators store ciphertext they can't read, for people
-    they may not know, and now purge on expiry. The operator duties that Syd's
-    review asked for are in [Operator duties](#operator-duties-legal-driven-phase-1),
-    with the analysis in [legal.md §4](legal.md#4-community-servers-and-blind-hosts).
-    **Open:** the items Syd couldn't verify in §4.6, and whether members can
-    be told about a specific hold.
+10. ~~**Legal:** exposure for host operators?~~ **Resolved (Syd):** answered by
+    [legal.md §4](legal.md#4-community-servers-and-blind-hosts) (#29, #32), and
+    the resulting duties are in [Operator duties](#operator-duties-legal-driven-phase-1).
+    Members are told about a hold or disclosure only when the law allows
+    (legal.md §4.4). The items Syd couldn't verify are tracked in
+    [legal.md §4.6](legal.md#46-couldnt-verify-open-items), not here.
 11. ~~**Disappearing timer start.**~~ **Decided (Chi):** Signal-style. The
     timer starts at send on the sender's device and on hosts, and at read on
     each recipient's device, with a hard cap of `sent + timer + 7 days` for
