@@ -2,8 +2,8 @@
 name = "umbra-tor"
 version = "0.1.0"
 edition = "2021"
-# Transitive idna/icu from libp2p currently need >=1.88; use rustup stable on this box.
-rust-version = "1.88"
+# Aligned with Elite's core workspace (vodozemac 0.11 requires >= 1.89).
+rust-version = "1.89"
 license = "AGPL-3.0-only"
 description = "Optional Tor (arti) transport spike for Umbra's libp2p stack"
 publish = false
@@ -17,18 +17,19 @@ tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util"]
 
 [dependencies]
 futures = "0.3"
+# Pinned to 0.55 to match Elite's workspace.dependencies / arti 0.35 line.
 libp2p = { version = "0.55", default-features = false, features = ["tokio"] }
 thiserror = "2"
 tracing = "0.1"
 
-# arti 0.35: last line that documented MSRV 1.85.1; API used below matches this series.
-# Newer arti (0.47) needs rustc 1.92 — fine on rustup stable, but pin for reproducible spike.
-arti-client = { version = "0.35", optional = true, default-features = false, features = ["tokio", "rustls", "compression", "onion-service-client"] }
+# arti 0.35 uses rusqlite 0.37 (same as umbra_core). Bump together.
+arti-client = { version = "0.35", optional = true, default-features = false, features = ["tokio", "rustls", "compression", "onion-service-client", "static-sqlite"] }
 tor-rtcompat = { version = "0.35", optional = true, default-features = false, features = ["tokio", "rustls"] }
 tokio-util = { version = "0.7", optional = true, features = ["compat"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
 
 [[example]]
 name = "dial_info"

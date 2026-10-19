@@ -4,7 +4,7 @@
 //!
 //! | Build | What you get |
 //! | --- | --- |
-//! | default | [`multiaddr_to_target`], [`socks`] fallback design (`TorMode`) |
+//! | default | [`multiaddr_to_target`], [`socks`] (`TorMode`, [`SocksDest`]), [`TorConfig`] |
 //! | `--features tor` | plus [`TorTransport`]: dial-only [`libp2p::core::Transport`] via embedded arti |
 //!
 //! Listening as an onion service is **not** implemented yet; see `docs/tor.md`.
@@ -16,8 +16,10 @@
 use libp2p::multiaddr::{Multiaddr, Protocol};
 use std::net::SocketAddr;
 
+pub mod config;
 pub mod socks;
-pub use socks::{SocksProxy, TorMode};
+pub use config::TorConfig;
+pub use socks::{multiaddr_to_socks_dest, target_to_socks_dest, SocksDest, SocksProxy, TorMode};
 
 /// Where a multiaddr points, in a form Tor can dial.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,12 @@ pub enum TorTarget {
 pub enum TorError {
     #[error("multiaddr is not dialable over Tor: {0}")]
     Unsupported(Multiaddr),
+    /// Custom state/cache dirs must both be set, or neither (arti defaults).
+    #[error("TorConfig: set both state_dir and cache_dir, or neither")]
+    IncompleteDirs,
+    #[cfg(feature = "tor")]
+    #[error("arti config: {0}")]
+    Config(#[from] arti_client::config::ConfigBuildError),
     #[cfg(feature = "tor")]
     #[error("arti: {0}")]
     Arti(#[from] arti_client::Error),

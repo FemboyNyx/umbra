@@ -13,6 +13,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  # Match Elite's pin; codegen/cargokit must stay on this version.
+  FRB_VERSION: "2.13.0"
 
 jobs:
   detect:
@@ -46,8 +48,9 @@ jobs:
         working-directory: core
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.89"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -55,9 +58,9 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: test
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
   flutter-analyze:
     name: Flutter analyze / test
@@ -73,6 +76,20 @@ jobs:
       - name: pub get
         working-directory: app
         run: flutter pub get
+      - name: Check flutter_rust_bridge pin (=2.13.0)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          if ! grep -q "flutter_rust_bridge" pubspec.yaml; then
+            echo "flutter_rust_bridge not in pubspec yet; skip pin check."
+            exit 0
+          fi
+          if ! grep -Eq 'flutter_rust_bridge:[[:space:]]*=?2\.13\.0' pubspec.yaml; then
+            echo "::error::flutter_rust_bridge must be pinned to =2.13.0 (Elite)"
+            grep -n "flutter_rust_bridge" pubspec.yaml || true
+            exit 1
+          fi
+          echo "flutter_rust_bridge pin OK (=2.13.0)"
       - name: analyze
         working-directory: app
         run: flutter analyze
@@ -91,8 +108,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         if: needs.detect.outputs.has_core == 'true'
+        with:
+          toolchain: "1.89"
       - uses: Swatinem/rust-cache@v2
         if: needs.detect.outputs.has_core == 'true'
         with:
@@ -114,6 +133,10 @@ jobs:
         run: |
           echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+      - name: Install native build deps (SQLCipher / OpenSSL via perl+make)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y perl make
       - uses: subosito/flutter-action@v2
         with:
           channel: stable

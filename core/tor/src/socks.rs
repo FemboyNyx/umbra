@@ -6,6 +6,7 @@
 //!
 //! - system `tor`'s `SocksPort` (typically `127.0.0.1:9050`)
 //! - `arti proxy`'s SOCKS listen address (configurable)
+//! - Orbot / similar on Android
 //!
 //! ## Why SOCKS5 and not a local DNS lookup
 //!
@@ -14,6 +15,12 @@
 //!
 //! - no local DNS query that would leak the destination
 //! - `.onion` names work at all (they have no public DNS)
+//!
+//! ## `/onion3` → SOCKS domain
+//!
+//! Use [`multiaddr_to_socks_dest`] / [`target_to_socks_dest`]: an `/onion3/…`
+//! multiaddr becomes a SOCKS5 **domain** target (`ATYP=0x03`) of
+//! `<56chars>.onion:port`, never a local resolve.
 //!
 //! ## Recommended wiring for Elite
 //!
@@ -29,6 +36,8 @@
 use std::net::SocketAddr;
 
 use libp2p::Multiaddr;
+
+use crate::{multiaddr_to_target, TorTarget};
 
 /// Where an external Tor SOCKS5 proxy is listening.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,9 +80,10 @@ impl SocksProxy {
 }
 
 /// How Umbra should obtain Tor connectivity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum TorMode {
     /// No Tor. Clearnet transports only.
+    #[default]
     Off,
     /// Embed arti (`umbra-tor` built with `--features tor`) and use [`crate::TorTransport`].
     EmbeddedArti,
@@ -81,10 +91,55 @@ pub enum TorMode {
     Socks(SocksProxy),
 }
 
-impl Default for TorMode {
-    fn default() -> Self {
-        Self::Off
+/// Destination to put in a SOCKS5 CONNECT request.
+///
+/// Domain variants **must** be sent as ATYP domain (0x03) so the proxy does DNS
+/// / onion resolution — never resolve locally first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SocksDest {
+    /// Literal IP (ATYP IPv4/IPv6). Exit relay still sees the IP.
+    Ip(SocketAddr),
+    /// Hostname or `.onion` (ATYP domain) and port.
+    Domain { host: String, port: u16 },
+}
+
+impl SocksDest {
+    /// Host string for ATYP domain, if any.
+    pub fn domain_host(&self) -> Option<&str> {
+        match self {
+            Self::Domain { host, .. } => Some(host.as_str()),
+            Self::Ip(_) => None,
+        }
     }
+
+    pub fn port(&self) -> u16 {
+        match self {
+            Self::Ip(sa) => sa.port(),
+            Self::Domain { port, .. } => *port,
+        }
+    }
+}
+
+/// Map a [`TorTarget`] to a SOCKS5 destination.
+///
+/// `/onion3` targets become `Domain { host: "<pubkey>.onion", port }` so the
+/// Tor SOCKS proxy handles the onion circuit (remote “DNS”).
+pub fn target_to_socks_dest(target: &TorTarget) -> SocksDest {
+    match target {
+        TorTarget::Ip(sa) => SocksDest::Ip(*sa),
+        TorTarget::Host(h, p) | TorTarget::Onion(h, p) => SocksDest::Domain {
+            host: h.clone(),
+            port: *p,
+        },
+    }
+}
+
+/// Map a libp2p multiaddr to a SOCKS5 destination.
+///
+/// Returns `None` for non-TCP shapes (QUIC, `/ws`, …), same as
+/// [`crate::multiaddr_to_target`].
+pub fn multiaddr_to_socks_dest(addr: &Multiaddr) -> Option<SocksDest> {
+    multiaddr_to_target(addr).map(|t| target_to_socks_dest(&t))
 }
 
 #[cfg(test)]
@@ -98,5 +153,54 @@ mod tests {
         let a = p.proxy_multiaddr();
         assert!(a.to_string().contains("127.0.0.1"));
         assert!(a.to_string().contains("9050"));
+    }
+
+    #[test]
+    fn tor_mode_default_is_off() {
+        assert_eq!(TorMode::default(), TorMode::Off);
+    }
+
+    #[test]
+    fn onion3_maps_to_socks_domain() {
+        let host = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid";
+        let a: Multiaddr = format!("/onion3/{host}:80").parse().unwrap();
+        let dest = multiaddr_to_socks_dest(&a).expect("onion3 dialable");
+        let expected_host = format!("{host}.onion");
+        assert_eq!(
+            dest,
+            SocksDest::Domain {
+                host: expected_host.clone(),
+                port: 80,
+            }
+        );
+        assert_eq!(dest.domain_host(), Some(expected_host.as_str()));
+        assert!(dest.domain_host().unwrap().ends_with(".onion"));
+    }
+
+    #[test]
+    fn dns_maps_to_socks_domain() {
+        let a: Multiaddr = "/dns4/example.org/tcp/443".parse().unwrap();
+        assert_eq!(
+            multiaddr_to_socks_dest(&a),
+            Some(SocksDest::Domain {
+                host: "example.org".into(),
+                port: 443,
+            })
+        );
+    }
+
+    #[test]
+    fn ip_maps_to_socks_ip() {
+        let a: Multiaddr = "/ip4/1.2.3.4/tcp/4001".parse().unwrap();
+        assert_eq!(
+            multiaddr_to_socks_dest(&a),
+            Some(SocksDest::Ip("1.2.3.4:4001".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn quic_not_socks() {
+        let a: Multiaddr = "/ip4/1.2.3.4/udp/4001/quic-v1".parse().unwrap();
+        assert_eq!(multiaddr_to_socks_dest(&a), None);
     }
 }
