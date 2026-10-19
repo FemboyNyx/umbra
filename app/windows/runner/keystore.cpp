@@ -124,6 +124,9 @@ void UmbraKeystore::Handle(
   }
   std::error_code ec;
   std::filesystem::create_directories(wide, ec);
+  // DPAPI blob for this Windows user only. There is no allowBackup
+  // equivalent; a copy of the support folder takes umbra.db, epoch, and this
+  // blob together, and the blob does not unwrap for another user.
   const auto path = std::filesystem::path(wide) / L"db_key.dpapi";
 
   uint8_t key[32];

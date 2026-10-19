@@ -27,6 +27,45 @@ void main() {
     );
   });
 
+  test('round-trips + and / in standard base64', () {
+    final signed = ContactCard(
+      peerId: card.peerId,
+      identityKey: 'abc+def/ghi',
+      ed25519Key: 'jkl+mno/pqr',
+      addrs: card.addrs,
+      sig: 'stu+vwx/yz0',
+    );
+    final built = buildUmbraQr(signed);
+    expect(built.contains('+'), isFalse);
+    final parsed = parseUmbraQr(built);
+    expect(parsed.identityKey, signed.identityKey);
+    expect(parsed.ed25519Key, signed.ed25519Key);
+    expect(parsed.sig, signed.sig);
+  });
+
+  test('raw plus links are not decoded as spaces', () {
+    const raw =
+        'umbra://add?peer=12D3KooWPeer&ik=abc+def/ghi&ed=jkl+mno/pqr&sig=stu+vwx/yz0';
+    final parsed = parseUmbraQr(raw);
+    expect(parsed.identityKey, 'abc+def/ghi');
+    expect(parsed.ed25519Key, 'jkl+mno/pqr');
+    expect(parsed.sig, 'stu+vwx/yz0');
+    expect(parsed.identityKey.contains(' '), isFalse);
+  });
+
+  test('does not rewrite url-safe ik or ed', () {
+    expect(
+      () => parseUmbraQr(
+        'umbra://add?peer=12D3KooWPeer&ik=aaa-bbb_ccc&ed=jkl+mno/pqr',
+      ),
+      throwsA(isA<UmbraException>()),
+    );
+    final parsed = parseUmbraQr(
+      'umbra://add?peer=12D3KooWPeer&ik=abc+def/ghi&ed=jkl+mno/pqr&sig=aaa-bbb_ccc',
+    );
+    expect(parsed.sig, 'aaa-bbb_ccc');
+  });
+
   test('keeps at most six addresses', () {
     final addrs = [for (var i = 0; i < 8; i++) '/ip4/192.0.2.$i/tcp/1'];
     final payload = buildUmbraQr(

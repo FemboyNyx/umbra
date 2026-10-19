@@ -22,7 +22,9 @@ Onboarding asks for a display name. Contacts lists the pending Mock Bot request.
 
 The app generates 32 random bytes once and stores them in the OS keystore (Android Keystore, Windows DPAPI, Linux libsecret). That exact key is passed to `init` and then wiped from Dart. Private identity keys stay in Rust.
 
-If libsecret is missing, Linux writes `{supportDir}/db_key.bin` mode `0600` and reports the backend as `file`.
+If libsecret is missing, Linux writes `{supportDir}/db_key.bin` mode `0600` and reports the backend as `file`. Windows stores a DPAPI blob at `{supportDir}/db_key.dpapi`, which unwraps only for that Windows user. Neither desktop has an `allowBackup` switch. Copying the support folder copies `umbra.db`, the `epoch` sidecar, and the fallback key file together.
+
+Android sets `allowBackup="false"` and `fullBackupOnly="true"`. Cloud backup is off, and `res/xml/data_extraction_rules.xml` also disables device-to-device transfer. `umbra.db`, `epoch`, `epoch.tmp`, `db_key.bin`, and the `umbra_keystore` preference (the Keystore-wrapped key) are excluded from both. Restoring `epoch` next to an old database would hide a rollback.
 
 ## Call signals
 

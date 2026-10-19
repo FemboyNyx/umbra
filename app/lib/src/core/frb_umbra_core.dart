@@ -5,6 +5,7 @@ import '../models/core_types.dart' as app;
 import '../rust/api/types.dart' as rust;
 import '../rust/api/umbra.dart' as rust_api;
 import '../rust/frb_generated.dart';
+import 'qr.dart';
 import 'umbra_core.dart';
 
 /// Forwards to the generated `flutter_rust_bridge` 2.13.0 bindings in
@@ -72,7 +73,12 @@ class FrbUmbraCore implements UmbraCore {
   @override
   Future<app.ContactCard> parseQr(String payload) async {
     await _ensureLibrary();
-    return _guard(() async => _card(await rust_api.parseQr(payload: payload)));
+    // Repair '+' that query decoding turned into spaces, then re-encode so
+    // core sees standard base64 rather than the raw link.
+    final normalized = buildUmbraQr(parseUmbraQr(payload));
+    return _guard(
+      () async => _card(await rust_api.parseQr(payload: normalized)),
+    );
   }
 
   @override
@@ -251,6 +257,7 @@ app.Contact _contact(rust.Contact contact) {
     online: contact.online,
     keyChanged: contact.keyChanged,
     pendingIdentityKey: contact.pendingIdentityKey,
+    signedCard: contact.signedCard,
   );
 }
 

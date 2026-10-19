@@ -1,17 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cloud backup and device-to-device transfer (API 31+) both stay empty.
+  allowBackup=false does not disable device transfer on Android 12+, so the
+  device-transfer block is required. path="." drops the whole domain; the
+  named paths record the secrets that must never move:
+  files/umbra.db (SQLCipher), files/epoch and files/epoch.tmp (restore
+  sidecar, outside the database), files/db_key.bin (Linux keystore fallback
+  if it is ever placed in the data dir), and sharedpref umbra_keystore
+  (Android Keystore-wrapped db_key).
+-->
 <data-extraction-rules>
-    <cloud-backup>
-        <exclude domain="root" />
-        <exclude domain="file" />
-        <exclude domain="database" />
-        <exclude domain="sharedpref" />
-        <exclude domain="external" />
+    <cloud-backup disableIfNoEncryptionCapabilities="true">
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="file" path="umbra.db" />
+        <exclude domain="file" path="epoch" />
+        <exclude domain="file" path="epoch.tmp" />
+        <exclude domain="file" path="db_key.bin" />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="sharedpref" path="umbra_keystore.xml" />
+        <exclude domain="external" path="." />
+        <exclude domain="device_root" path="." />
+        <exclude domain="device_file" path="." />
+        <exclude domain="device_database" path="." />
+        <exclude domain="device_sharedpref" path="." />
     </cloud-backup>
     <device-transfer>
-        <exclude domain="root" />
-        <exclude domain="file" />
-        <exclude domain="database" />
-        <exclude domain="sharedpref" />
-        <exclude domain="external" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="file" path="umbra.db" />
+        <exclude domain="file" path="epoch" />
+        <exclude domain="file" path="epoch.tmp" />
+        <exclude domain="file" path="db_key.bin" />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="sharedpref" path="umbra_keystore.xml" />
+        <exclude domain="external" path="." />
+        <exclude domain="device_root" path="." />
+        <exclude domain="device_file" path="." />
+        <exclude domain="device_database" path="." />
+        <exclude domain="device_sharedpref" path="." />
     </device-transfer>
 </data-extraction-rules>

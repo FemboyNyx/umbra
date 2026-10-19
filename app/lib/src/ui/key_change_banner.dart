@@ -51,6 +51,11 @@ class _KeyChangeBannerState extends State<KeyChangeBanner> {
             '$name presented a new identity key. Compare the new safety number in person before you accept. Accepting resets verified.',
             style: theme.textTheme.bodyMedium?.copyWith(height: 1.35),
           ),
+          const SizedBox(height: 6),
+          Text(
+            keyChangeSourceCopy(widget.notice.source),
+            style: theme.textTheme.bodySmall,
+          ),
           const SizedBox(height: 10),
           _Number(label: 'Previous', value: widget.notice.oldSafetyNumber),
           if (newNumber.isNotEmpty) ...[
@@ -101,6 +106,16 @@ class _KeyChangeBannerState extends State<KeyChangeBanner> {
       });
     }
   }
+}
+
+/// Where the new key was seen. Roster is a server member list.
+String keyChangeSourceCopy(KeyChangeSource source) {
+  return switch (source) {
+    KeyChangeSource.hello => 'Seen in a hello.',
+    KeyChangeSource.keyClaim => 'Seen in a key claim.',
+    KeyChangeSource.contactCard => 'Seen on a contact card.',
+    KeyChangeSource.roster => 'Seen in a server roster.',
+  };
 }
 
 class _Number extends StatelessWidget {
