@@ -51,13 +51,13 @@ void main() {
           ({
             required String peerId,
             required String callId,
-            required String kind,
+            required String kindWire,
             required String payload,
           }) async {
             forwarded.add({
               'peerId': peerId,
               'callId': callId,
-              'kind': kind,
+              'kindWire': kindWire,
               'payload': payload,
             });
           };
@@ -85,13 +85,13 @@ void main() {
         {
           'peerId': 'peer-a',
           'callId': 'call-1',
-          'kind': 'Offer',
+          'kindWire': 'Offer',
           'payload': '{"sdp":"v=0"}',
         },
         {
           'peerId': 'peer-a',
           'callId': 'call-1',
-          'kind': 'IceCandidate',
+          'kindWire': 'IceCandidate',
           'payload': '{"candidate":"c"}',
         },
       ]);

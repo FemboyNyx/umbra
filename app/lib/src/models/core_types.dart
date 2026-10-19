@@ -11,7 +11,7 @@ enum SignalKind { offer, answer, iceCandidate, hangup, ringing, reject }
 /// Wire names from `core` `SignalKind` (`Offer`, `Answer`, …).
 ///
 /// This is a name, not call handling. `CallController.handleCoreSignal`
-/// is the only place that acts on Offer/Answer/ICE.
+/// (`peerId`, `callId`, `kindWire`, `payload`) is the only ingress.
 String coreSignalKindWire(SignalKind kind) {
   return switch (kind) {
     SignalKind.offer => 'Offer',

@@ -45,7 +45,7 @@ class UmbraController extends ChangeNotifier {
   Future<void> Function({
     required String peerId,
     required String callId,
-    required String kind,
+    required String kindWire,
     required String payload,
   })?
   handleCoreSignal;
@@ -255,7 +255,7 @@ class UmbraController extends ChangeNotifier {
               await forward(
                 peerId: peerId,
                 callId: callId,
-                kind: coreSignalKindWire(kind),
+                kindWire: coreSignalKindWire(kind),
                 payload: payload,
               );
             } catch (err, stack) {

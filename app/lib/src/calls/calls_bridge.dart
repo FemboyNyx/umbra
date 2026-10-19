@@ -30,21 +30,19 @@ class UmbraCallsBridge {
     }),
   );
 
-  /// Gem's ingress (`CallController.handleCoreSignal` on `gem` at `af9871c`).
+  /// Gem's ingress: `CallController.handleCoreSignal` (`c151dcc`).
   ///
-  /// Invoked by name. Offer, Answer, and ICE are not sent through
-  /// `handleSignal` or any other call entry point.
+  /// Offer, Answer, and ICE are not interpreted here.
   Future<void> handleCoreSignal({
     required String peerId,
     required String callId,
-    required String kind,
+    required String kindWire,
     required String payload,
   }) {
-    final gem = controller as dynamic;
-    return gem.handleCoreSignal(
+    return controller.handleCoreSignal(
       peerId: peerId,
       callId: callId,
-      kind: kind,
+      kindWire: kindWire,
       payload: payload,
     );
   }

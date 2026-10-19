@@ -53,7 +53,9 @@ if (umbraCoreDir.exists() && new File(umbraCoreDir, "Cargo.toml").exists() && um
     logger.lifecycle("Umbra: cargokit building ${umbraCoreDir} (libumbra_core)")
     apply from: "../cargokit/gradle/plugin.gradle"
     cargokit {
-        manifestDir = umbraCoreDir.absolutePath
+        // Relative to this file (rust_builder/android). An absolute path is
+        // joined onto that directory by cargokit and misses core/Cargo.toml.
+        manifestDir = "../../../core"
         libname = "umbra_core"
     }
 } else {
