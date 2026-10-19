@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use libp2p::multiaddr::Protocol;
@@ -16,6 +16,7 @@ use vodozemac::Curve25519PublicKey;
 use crate::api::types::*;
 use crate::engine::crypto::{fingerprint_of, Crypto, Identity};
 use crate::engine::events::EventHub;
+use crate::engine::limits::{KeyedBuckets, Limits, TokenBucket};
 use crate::engine::net::{self, NetConfig, NetHandle, TransportMode};
 use crate::engine::proto::*;
 use crate::engine::store::{ContactRow, Store};
@@ -47,6 +48,35 @@ pub struct Core {
     cfg: CoreConfig,
     net: Mutex<NetState>,
     peer_locks: Mutex<HashMap<PeerId, Arc<tokio::sync::Mutex<()>>>>,
+    limits: Limits,
+    limiter: Mutex<Limiter>,
+}
+
+/// Mutable rate-limiter state (see `engine::limits`).
+struct Limiter {
+    hello: KeyedBuckets<PeerId>,
+    otk_claims: KeyedBuckets<PeerId>,
+    contact_requests: TokenBucket,
+    /// Unknown identities with an emitted `ContactRequest` -> last emission.
+    pending_requests: HashMap<PeerId, Instant>,
+    /// Fresh OTKs issued per requester and not yet consumed.
+    outstanding_otks: HashMap<PeerId, Vec<(Curve25519PublicKey, Instant)>>,
+}
+
+impl Limiter {
+    fn new(l: &Limits) -> Self {
+        Self {
+            hello: KeyedBuckets::new(l.hello_burst, l.hello_refill, l.max_tracked_peers),
+            otk_claims: KeyedBuckets::new(
+                l.otk_claim_burst,
+                l.otk_claim_refill,
+                l.max_tracked_peers,
+            ),
+            contact_requests: TokenBucket::new(l.contact_request_burst, l.contact_request_refill),
+            pending_requests: HashMap::new(),
+            outstanding_otks: HashMap::new(),
+        }
+    }
 }
 
 enum DeliverError {
@@ -90,6 +120,17 @@ impl Core {
         cfg: CoreConfig,
         events: EventHub,
     ) -> Result<Arc<Self>> {
+        Self::open_with_limits(data_dir, db_key, cfg, events, Limits::default())
+    }
+
+    /// [`Self::open`] with non-default abuse limits.
+    pub fn open_with_limits(
+        data_dir: &Path,
+        db_key: &[u8],
+        cfg: CoreConfig,
+        events: EventHub,
+        limits: Limits,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create {}", data_dir.display()))?;
         let store = Arc::new(Store::open(&data_dir.join(DB_FILE), db_key)?);
@@ -102,7 +143,13 @@ impl Core {
             cfg,
             net: Mutex::new(NetState::default()),
             peer_locks: Mutex::new(HashMap::new()),
+            limiter: Mutex::new(Limiter::new(&limits)),
+            limits,
         }))
+    }
+
+    fn lim(&self) -> MutexGuard<'_, Limiter> {
+        self.limiter.lock().expect("limiter poisoned")
     }
 
     fn ns(&self) -> MutexGuard<'_, NetState> {
@@ -305,6 +352,7 @@ impl Core {
             rejected_identity_key: prev.as_ref().and_then(|p| p.rejected_identity_key.clone()),
         };
         self.store.upsert_contact(&row)?;
+        self.lim().pending_requests.remove(&peer);
         let handle = self.ns().handle.clone();
         if let Some(h) = handle {
             h.add_addrs(peer, parse_addrs(&row.addrs));
@@ -650,6 +698,9 @@ impl Core {
     }
 
     fn on_hello(self: &Arc<Self>, peer: PeerId, card: ContactCard) -> MsgResponse {
+        if !self.lim().hello.try_take(&peer, Instant::now()) {
+            return MsgResponse::Rejected(RejectReason::RateLimited);
+        }
         match qr::validate_card(&card) {
             Ok(p) if p == peer => {}
             _ => return MsgResponse::Rejected(RejectReason::Malformed),
@@ -675,10 +726,47 @@ impl Core {
                 MsgResponse::Ok
             }
             Ok(None) => {
-                self.events.emit(CoreEvent::ContactRequest { card });
+                if self.admit_contact_request(peer) {
+                    self.events.emit(CoreEvent::ContactRequest { card });
+                }
                 MsgResponse::Rejected(RejectReason::NotAContact)
             }
             Err(_) => MsgResponse::Rejected(RejectReason::Internal),
+        }
+    }
+
+    /// Dedupe + budget for `ContactRequest` events from unknown identities.
+    fn admit_contact_request(&self, peer: PeerId) -> bool {
+        let now = Instant::now();
+        let l = &self.limits;
+        let mut lim = self.lim();
+        let ttl = l.pending_contact_request_ttl;
+        lim.pending_requests
+            .retain(|_, t| now.saturating_duration_since(*t) < ttl);
+        match lim.pending_requests.get(&peer) {
+            Some(t) if now.saturating_duration_since(*t) < l.contact_request_window => false,
+            Some(_) => {
+                if lim.contact_requests.try_take(now) {
+                    lim.pending_requests.insert(peer, now);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                if lim.pending_requests.len() >= l.max_pending_contact_requests {
+                    tracing::warn!("pending contact requests full; dropping request from {peer}");
+                    return false;
+                }
+                if !lim.contact_requests.try_take(now) {
+                    tracing::warn!(
+                        "contact request budget exhausted; dropping request from {peer}"
+                    );
+                    return false;
+                }
+                lim.pending_requests.insert(peer, now);
+                true
+            }
         }
     }
 
@@ -688,7 +776,12 @@ impl Core {
             return Ok(MsgResponse::Rejected(RejectReason::NotAContact));
         };
         let ik = Curve25519PublicKey::from_base64(&contact.identity_key)?;
-        let pt = self.crypto.decrypt(&pid, ik, t, c)?;
+        let (pt, consumed) = self.crypto.decrypt_ex(&pid, ik, t, c)?;
+        if let Some(k) = consumed {
+            if let Some(v) = self.lim().outstanding_otks.get_mut(&peer) {
+                v.retain(|(x, _)| *x != k);
+            }
+        }
         let p: Payload = match serde_json::from_slice(&pt) {
             Ok(p) => p,
             Err(_) => return Ok(MsgResponse::Rejected(RejectReason::Malformed)),
@@ -736,10 +829,14 @@ impl Core {
     pub(crate) fn handle_keys(&self, peer: PeerId, req: KeysRequest) -> KeysResponse {
         match req {
             KeysRequest::ClaimOneTimeKey => {
+                // Contacts only, so strangers never occupy limiter state.
                 if !self.is_contact(&peer) {
                     return KeysResponse::Refused(RejectReason::NotAContact);
                 }
-                match self.crypto.claim_one_time_key() {
+                if !self.lim().otk_claims.try_take(&peer, Instant::now()) {
+                    return KeysResponse::Refused(RejectReason::RateLimited);
+                }
+                match self.issue_key(peer) {
                     Ok(k) => KeysResponse::Key {
                         identity_key: self.id.curve25519_b64(),
                         one_time_key: k.to_base64(),
@@ -751,6 +848,29 @@ impl Core {
                 }
             }
         }
+    }
+
+    /// A fresh OTK if the requester (and everyone together) is under the
+    /// outstanding caps, otherwise the reusable fallback key. Never blocks.
+    fn issue_key(&self, peer: PeerId) -> Result<Curve25519PublicKey> {
+        let now = Instant::now();
+        let l = &self.limits;
+        let mut lim = self.lim();
+        let ttl = l.outstanding_otk_ttl;
+        lim.outstanding_otks.retain(|_, v| {
+            v.retain(|(_, t)| now.saturating_duration_since(*t) < ttl);
+            !v.is_empty()
+        });
+        let mine = lim.outstanding_otks.get(&peer).map_or(0, Vec::len);
+        let total: usize = lim.outstanding_otks.values().map(Vec::len).sum();
+        if mine >= l.max_outstanding_otks_per_peer || total >= l.max_outstanding_otks_total {
+            return self.crypto.fallback_key();
+        }
+        let k = self
+            .crypto
+            .take_one_time_key(l.otk_pool_low_water, l.otk_pool_batch)?;
+        lim.outstanding_otks.entry(peer).or_default().push((k, now));
+        Ok(k)
     }
 
     // ---- outbound ----
@@ -921,6 +1041,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::limits::*;
 
     pub(crate) fn open(
         key: u8,
@@ -934,6 +1055,214 @@ mod tests {
         let rx = hub.subscribe();
         let core = Core::open(dir.path(), &[key; 32], CoreConfig::default(), hub).unwrap();
         (core, rx, dir)
+    }
+
+    fn open_lim(
+        key: u8,
+        limits: Limits,
+    ) -> (
+        Arc<Core>,
+        tokio::sync::mpsc::UnboundedReceiver<CoreEvent>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = EventHub::new();
+        let rx = hub.subscribe();
+        let core =
+            Core::open_with_limits(dir.path(), &[key; 32], CoreConfig::default(), hub, limits)
+                .unwrap();
+        (core, rx, dir)
+    }
+
+    fn requests(evs: &[CoreEvent]) -> usize {
+        evs.iter()
+            .filter(|e| matches!(e, CoreEvent::ContactRequest { .. }))
+            .count()
+    }
+
+    fn hello(card: &ContactCard) -> MsgRequest {
+        MsgRequest::Hello { card: card.clone() }
+    }
+
+    /// `from` claims a key from `to`, opens an Olm session on it and
+    /// delivers a text; returns the claimed key.
+    fn claim_and_send(to: &Arc<Core>, from: &Arc<Core>, text: &str) -> Curve25519PublicKey {
+        let pf = from.peer_id();
+        let KeysResponse::Key {
+            identity_key,
+            one_time_key,
+        } = to.handle_keys(pf, KeysRequest::ClaimOneTimeKey)
+        else {
+            panic!("claim refused")
+        };
+        let ik = Curve25519PublicKey::from_base64(&identity_key).unwrap();
+        let otk = Curve25519PublicKey::from_base64(&one_time_key).unwrap();
+        send_on(to, from, ik, otk, text);
+        otk
+    }
+
+    fn send_on(
+        to: &Arc<Core>,
+        from: &Arc<Core>,
+        ik: Curve25519PublicKey,
+        otk: Curve25519PublicKey,
+        text: &str,
+    ) {
+        let (pt, pf) = (to.peer_id(), from.peer_id());
+        let pts = pt.to_base58();
+        from.crypto.forget_sessions(&pts).unwrap();
+        from.crypto.create_outbound(&pts, ik, otk).unwrap();
+        let p = Payload {
+            v: 1,
+            to: pts.clone(),
+            id: uuid::Uuid::new_v4().to_string(),
+            ts: now_ms(),
+            body: PayloadBody::Text { text: text.into() },
+        };
+        let (t, c) = from
+            .crypto
+            .encrypt(&pts, &serde_json::to_vec(&p).unwrap())
+            .unwrap();
+        assert_eq!(
+            to.handle_msg(pf, MsgRequest::Olm { t, c }),
+            MsgResponse::Delivered
+        );
+    }
+
+    async fn befriend(a: &Arc<Core>, b: &Arc<Core>) {
+        a.add_contact(b.self_card(), false).await.unwrap();
+        b.add_contact(a.self_card(), false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hello_flood_is_deduped_and_throttled() {
+        let (a, mut rx, _da) = open_lim(
+            1,
+            Limits {
+                contact_request_burst: 3,
+                ..Limits::default()
+            },
+        );
+        // One unknown identity hammering: a single ContactRequest, then RateLimited.
+        let (s, _rs, _ds) = open(2);
+        let card = s.self_card();
+        let resp: Vec<_> = (0..20)
+            .map(|_| a.handle_msg(s.peer_id(), hello(&card)))
+            .collect();
+        assert_eq!(requests(&drain(&mut rx)), 1);
+        let limited = resp
+            .iter()
+            .filter(|r| **r == MsgResponse::Rejected(RejectReason::RateLimited))
+            .count();
+        assert_eq!(limited, 20 - HELLO_BURST as usize);
+
+        // Many distinct unknown identities: only the global budget gets through.
+        let mut keep = vec![];
+        for k in 10..16 {
+            let (c, _r, d) = open(k);
+            assert_eq!(
+                a.handle_msg(c.peer_id(), hello(&c.self_card())),
+                MsgResponse::Rejected(RejectReason::NotAContact)
+            );
+            keep.push((c, d));
+        }
+        assert_eq!(requests(&drain(&mut rx)), 2, "3 budget - 1 already used");
+
+        // A known contact is unaffected by the flood.
+        let (b, _rb, _db) = open(3);
+        befriend(&a, &b).await;
+        assert_eq!(
+            a.handle_msg(b.peer_id(), hello(&b.self_card())),
+            MsgResponse::Ok
+        );
+        claim_and_send(&a, &b, "still here");
+    }
+
+    #[tokio::test]
+    async fn pending_contact_requests_are_capped() {
+        let (a, mut rx, _da) = open_lim(
+            1,
+            Limits {
+                contact_request_burst: 100,
+                max_pending_contact_requests: 2,
+                ..Limits::default()
+            },
+        );
+        let peers: Vec<_> = (10..14).map(open).collect();
+        for (c, _, _) in &peers {
+            a.handle_msg(c.peer_id(), hello(&c.self_card()));
+        }
+        assert_eq!(requests(&drain(&mut rx)), 2);
+        // Accepting one frees a slot.
+        a.add_contact(peers[0].0.self_card(), false).await.unwrap();
+        a.handle_msg(peers[3].0.peer_id(), hello(&peers[3].0.self_card()));
+        assert_eq!(requests(&drain(&mut rx)), 1);
+    }
+
+    #[tokio::test]
+    async fn otk_claim_flood_is_rationed_and_others_still_get_sessions() {
+        let (a, _ra, _da) = open(1);
+        let (b, _rb, _db) = open(2);
+        let (c, _rc, _dc) = open(3);
+        befriend(&a, &b).await;
+        befriend(&a, &c).await;
+        let fallback = a.crypto.fallback_key().unwrap();
+        let claim = |p: &Arc<Core>| match a.handle_keys(p.peer_id(), KeysRequest::ClaimOneTimeKey) {
+            KeysResponse::Key { one_time_key, .. } => {
+                Some(Curve25519PublicKey::from_base64(&one_time_key).unwrap())
+            }
+            KeysResponse::Refused(r) => {
+                assert_eq!(r, RejectReason::RateLimited);
+                None
+            }
+        };
+
+        // B floods: 2 fresh keys (outstanding cap), then the fallback key, then throttled.
+        let got: Vec<_> = (0..10).map(|_| claim(&b)).collect();
+        let fresh: Vec<_> = got.iter().flatten().filter(|k| **k != fallback).collect();
+        assert_eq!(fresh.len(), MAX_OUTSTANDING_OTKS_PER_PEER);
+        assert_ne!(fresh[0], fresh[1]);
+        assert_eq!(got[2], Some(fallback));
+        assert_eq!(got.iter().flatten().count(), OTK_CLAIM_BURST as usize);
+        // The pool was replenished in one batch and only drained by what B got.
+        assert_eq!(a.crypto.pool_size().unwrap(), OTK_POOL_BATCH - 2);
+
+        // C is unaffected: gets a fresh key and a working session.
+        let k = claim_and_send(&a, &c, "hi from c");
+        assert_ne!(k, fallback);
+
+        // Sessions on B's fresh and fallback keys work too, and using a fresh
+        // key frees B's outstanding slot.
+        let aik = a.id.curve25519;
+        send_on(&a, &b, aik, *fresh[0], "fresh");
+        assert_eq!(a.lim().outstanding_otks[&b.peer_id()].len(), 1);
+        send_on(&a, &b, aik, fallback, "fallback");
+    }
+
+    #[tokio::test]
+    async fn otk_total_cap_falls_back_without_blocking() {
+        let (a, _ra, _da) = open_lim(
+            1,
+            Limits {
+                max_outstanding_otks_total: 2,
+                otk_pool_low_water: 1,
+                otk_pool_batch: 1,
+                ..Limits::default()
+            },
+        );
+        let (b, _rb, _db) = open(2);
+        let (c, _rc, _dc) = open(3);
+        befriend(&a, &b).await;
+        befriend(&a, &c).await;
+        let fallback = a.crypto.fallback_key().unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                a.handle_keys(b.peer_id(), KeysRequest::ClaimOneTimeKey),
+                KeysResponse::Key { .. }
+            ));
+        }
+        // Pool exhausted for fresh keys: C gets the fallback key and still connects.
+        assert_eq!(claim_and_send(&a, &c, "via fallback"), fallback);
     }
 
     fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<CoreEvent> {
@@ -952,7 +1281,14 @@ mod tests {
 
     #[tokio::test]
     async fn key_change_is_flagged_rejected_and_resolvable() {
-        let (a, mut rx, _da) = open(1);
+        // Many Hellos from one peer here; keep them below the rate limit.
+        let (a, mut rx, _da) = open_lim(
+            1,
+            Limits {
+                hello_burst: 100,
+                ..Limits::default()
+            },
+        );
         let (b, _rxb, _db) = open(2);
         let card_b = b.self_card();
         let pb = card_b.peer_id.clone();

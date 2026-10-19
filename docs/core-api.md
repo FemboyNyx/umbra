@@ -209,17 +209,19 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
   SHA-512 over `ed25519 || curve25519` + PeerId), 30 digits per side,
   sorted and concatenated.
 * **`/umbra/keys/1`** (CBOR): `ClaimOneTimeKey` → `Key { identity_key,
-  one_time_key }`. Served **only to contacts**; falls back to the fallback key.
+  one_time_key }`. Served **only to contacts**, rate-limited, falling back to
+  the fallback key when one-time keys are rationed (see *Abuse limits*).
   The claimer checks `identity_key` equals the one from the QR.
 * **`/umbra/msg/1`** (CBOR): `Hello { card }` (once per connection) or
   `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
-  `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch)`.
+  `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch |
+  RateLimited)`.
   Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal}`; `to` must be
   the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per
   peer, pre-key messages matched by session id.
 * **Contact flow**: Alice scans Bob → Alice's Hello reaches Bob → Bob gets
-  `ContactRequest` (repeated on each new connection until accepted; dedupe by
-  `peer_id`). Messages Alice sends meanwhile wait in her outbox and flush
+  `ContactRequest` (at most once per identity per 10 min until accepted,
+  subject to the limits below; still dedupe by `peer_id` in the UI). Messages Alice sends meanwhile wait in her outbox and flush
   when Bob calls `add_contact`.
 * **Outbox**: retried on connect, on Hello, on mDNS/DHT discovery and every
   15 s; duplicates are dropped by message id; `DecryptFailed` resets the
@@ -227,6 +229,40 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
 * **Peer discovery**: QR addrs, mDNS (if enabled), identify, Kademlia
   (`/umbra/kad/1.0.0`, own DHT — needs `bootstrap_addrs`), relay v2
   circuits + DCUtR hole punching (`relay_addrs`).
+
+## Abuse limits
+
+Inbound traffic from strangers and key claims are throttled in
+`core/src/engine/limits.rs`. Each value is a `pub const` with the default
+below; `Core::open_with_limits(.., Limits { .. })` overrides them (used by
+tests; the bridge uses the defaults).
+
+| Constant | Default | Effect |
+|---|---|---|
+| `HELLO_BURST` / `HELLO_REFILL` | 5 / 1 per 10 s | Per-peer token bucket on `Hello` (contacts too). Excess gets `Rejected(RateLimited)`. |
+| `CONTACT_REQUEST_WINDOW` | 10 min | At most one `ContactRequest` event per unknown identity per window. |
+| `CONTACT_REQUEST_BURST` / `_REFILL` | 10 / 1 per 10 s | Global budget of `ContactRequest` events (sybil floods). |
+| `MAX_PENDING_CONTACT_REQUESTS` | 64 | Distinct unanswered requesters tracked; beyond that new requests are dropped (logged). `add_contact` frees a slot. |
+| `PENDING_CONTACT_REQUEST_TTL` | 24 h | A pending request is forgotten after this. |
+| `OTK_CLAIM_BURST` / `_REFILL` | 3 / 1 per 60 s | Per-contact `ClaimOneTimeKey` bucket; excess gets `Refused(RateLimited)` (the claimer retries later). |
+| `MAX_OUTSTANDING_OTKS_PER_PEER` | 2 | Fresh one-time keys a contact may hold unconsumed. Beyond that it gets the **fallback key**, so its session still works but it can't drain the pool. |
+| `MAX_OUTSTANDING_OTKS_TOTAL` | 50 | Same, across all contacts. |
+| `OUTSTANDING_OTK_TTL` | 1 h | An unconsumed key stops counting after this. |
+| `OTK_POOL_LOW_WATER` / `OTK_POOL_BATCH` | 5 / 20 | The published pool is topped up by 20 keys when fewer than 5 remain. |
+| `MAX_TRACKED_PEERS` | 1024 | Bound on per-peer bucket state (idle buckets, then least recently used, are evicted). |
+
+Notes:
+
+* A key claim never blocks: a contact gets a fresh key, the fallback key, or
+  `RateLimited`. One contact's flood doesn't affect other contacts' claims
+  or sessions.
+* A one-time key stops counting as outstanding once a pre-key message using
+  it is decrypted.
+* The fallback key is generated once and not rotated; its public half is kept
+  in the store (`olm_fallback_key`) because vodozemac only reports it while
+  unpublished.
+* Limiter state lives in memory and resets on restart. The OTK pool is
+  persisted.
 
 ## Tor mode
 
