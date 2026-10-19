@@ -12,15 +12,38 @@ Rust core exposed to Flutter through **flutter_rust_bridge v2**.
 | frb `rust_root` | `../core/` relative to `app/` |
 | Toolchain | Rust >= 1.89 (vodozemac 0.11). `core/rust-toolchain.toml` pins 1.99.1 for rustup users |
 | libp2p | 0.55 (pinned in `[workspace.dependencies]` to match `umbra-tor`) |
+| SQLite | `rusqlite 0.37` + `bundled-sqlcipher`; Android/iOS/Windows automatically use `bundled-sqlcipher-vendored-openssl` (feature `vendored-openssl` forces it elsewhere) |
 
 `core/src/frb_generated.rs` is a **placeholder** so the crate compiles before
 codegen; `flutter_rust_bridge_codegen generate` overwrites it.
 
 ## Status
 
-API is stable at v0 for app/ and calls/ to code against. Pass
-`CoreConfig { mock: true }` to get the in-memory mock backend (no disk, no
-network) while the real backend lands.
+Real backend implemented (identity, SQLCipher store, Olm, libp2p, outbox,
+Tor-only mode). `CoreConfig { mock: true }` still gives the in-memory mock
+backend for UI work.
+
+## Building
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"     # rustup toolchain, not /usr/bin (1.85)
+cd core
+cargo build && cargo test && cargo clippy --all-targets
+```
+
+Android (verified for aarch64 / armv7 / x86_64 with NDK r27c, API 24):
+
+```bash
+N=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+export CC_aarch64_linux_android=$N/aarch64-linux-android24-clang \
+       AR_aarch64_linux_android=$N/llvm-ar \
+       CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$N/aarch64-linux-android24-clang
+cargo build --release --lib --target aarch64-linux-android
+```
+
+Needs `perl` and `make` on the build host (OpenSSL is built from source for
+SQLCipher). The resulting `.so` only links `libc`/`libdl`. cargokit sets the
+CC/linker variables itself.
 
 ## Lifecycle
 
@@ -76,6 +99,7 @@ fn mark_read(peer_id: String, up_to: MessageId) -> Result<()>;
 ```
 
 * `MessageId` = `String` (UUID v4).
+* Max text body 64 KiB. Timestamps are the sender's clock.
 * `send_text` persists the message and returns at once with status `Sent`.
   `Delivered` arrives when the peer acked; `Failed` only if it expires
   (7 days) or is rejected permanently.
@@ -138,6 +162,50 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
 3. Additions: `CoreConfig.listen_addrs`, `CoreConfig.mock`, `network_status()`,
    `SelfInfo.{identity_key, ed25519_key, addrs}`, optional `name=` in the QR,
    `Contact.{safety_number, added_at_ms, online}`.
+
+## Protocol summary
+
+* **Identity**: Ed25519 device key (libp2p) → PeerId + Noise auth; vodozemac
+  Olm account → Curve25519 identity key. Both stored in SQLCipher; the Olm
+  pickles are additionally encrypted with `HKDF-SHA256(db_key, "olm-pickle-v1")`.
+* **Safety number**: Signal's numeric-fingerprint construction (5200 ×
+  SHA-512 over `ed25519 || curve25519` + PeerId), 30 digits per side,
+  sorted and concatenated.
+* **`/umbra/keys/1`** (CBOR): `ClaimOneTimeKey` → `Key { identity_key,
+  one_time_key }`. Served **only to contacts**; falls back to the fallback key.
+  The claimer checks `identity_key` equals the one from the QR.
+* **`/umbra/msg/1`** (CBOR): `Hello { card }` (once per connection) or
+  `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
+  `Rejected(NotAContact | DecryptFailed | Malformed | Internal)`.
+  Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal}`; `to` must be
+  the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per
+  peer, pre-key messages matched by session id.
+* **Contact flow**: Alice scans Bob → Alice's Hello reaches Bob → Bob gets
+  `ContactRequest` (repeated on each new connection until accepted; dedupe by
+  `peer_id`). Messages Alice sends meanwhile wait in her outbox and flush
+  when Bob calls `add_contact`.
+* **Outbox**: retried on connect, on Hello, on mDNS/DHT discovery and every
+  15 s; duplicates are dropped by message id; `DecryptFailed` resets the
+  session once and retries.
+* **Peer discovery**: QR addrs, mDNS (if enabled), identify, Kademlia
+  (`/umbra/kad/1.0.0`, own DHT — needs `bootstrap_addrs`), relay v2
+  circuits + DCUtR hole punching (`relay_addrs`).
+
+## Tor mode
+
+Tor-only when `CoreConfig.tor_socks = "ip:port"` (system tor / Orbot /
+`arti proxy`), or when built with cargo feature `tor` (embedded arti via
+`umbra-tor`; see `docs/tor.md` on the backup branch):
+
+* base transport is the Tor dialer **only** (never `or()`-ed with TCP/QUIC);
+  no local DNS, no listening, no mDNS, no DCUtR, Kademlia client mode,
+  identify hides listen addresses;
+* inbound reachability only via `relay_addrs` circuits (QR advertises only
+  `/p2p-circuit` addresses);
+* calls (`calls/`, WebRTC) are not routed through Tor — the UI must say so.
+
+To enable `tor` once `core/tor/` is on main: uncomment the `"tor"` workspace
+member, the `umbra-tor` dependency and the `tor` feature in `core/Cargo.toml`.
 
 ## Mock backend (`mock: true`)
 

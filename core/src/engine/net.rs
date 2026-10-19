@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use futures::StreamExt;
 use libp2p::core::upgrade::Version;
 use libp2p::multiaddr::Protocol;
@@ -249,10 +249,17 @@ pub async fn spawn(
     let mut swarm = build_swarm(keypair, &cfg.mode).await?;
 
     if !tor {
+        // Best effort per address (e.g. no IPv6 on this network); fail only
+        // if nothing could be bound.
+        let mut errors = Vec::new();
         for a in &cfg.listen {
-            swarm
-                .listen_on(a.clone())
-                .with_context(|| format!("listen on {a}"))?;
+            if let Err(e) = swarm.listen_on(a.clone()) {
+                tracing::warn!(%a, "listen failed: {e}");
+                errors.push(format!("{a}: {e}"));
+            }
+        }
+        if !cfg.listen.is_empty() && errors.len() == cfg.listen.len() {
+            anyhow::bail!("could not listen on any address: {}", errors.join("; "));
         }
     }
     let mut book: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
