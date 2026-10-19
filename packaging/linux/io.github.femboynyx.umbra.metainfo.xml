@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo for Umbra.
+  Validate: appstream-util validate-relax packaging/linux/io.github.femboynyx.umbra.metainfo.xml
+-->
+<component type="desktop-application">
+  <id>io.github.femboynyx.umbra</id>
+  <name>Umbra</name>
+  <summary>P2P end-to-end encrypted messenger with voice and video calls</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <developer id="io.github.femboynyx">
+    <name>FemboyNyx</name>
+  </developer>
+  <description>
+    <p>
+      Umbra is a peer-to-peer, end-to-end encrypted messenger for Android,
+      Windows, and Linux. It supports direct messaging plus encrypted voice
+      and video calls without a central chat server.
+    </p>
+    <p>
+      Early development: not audited. Do not rely on it for high-risk use yet.
+    </p>
+  </description>
+  <launchable type="desktop-id">umbra.desktop</launchable>
+  <url type="homepage">https://github.com/FemboyNyx/umbra</url>
+  <url type="bugtracker">https://github.com/FemboyNyx/umbra/issues</url>
+  <url type="vcs-browser">https://github.com/FemboyNyx/umbra</url>
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+    <category>Chat</category>
+  </categories>
+  <provides>
+    <binary>umbra</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-19"/>
+  </releases>
+</component>

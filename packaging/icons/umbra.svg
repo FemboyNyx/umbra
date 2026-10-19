@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Umbra">
+  <!-- Placeholder icon: crescent / shadow motif. Replace before release. -->
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a1028"/>
+      <stop offset="100%" stop-color="#0b0612"/>
+    </linearGradient>
+    <linearGradient id="crescent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c9b6ff"/>
+      <stop offset="100%" stop-color="#7b5cff"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <!-- Full disc -->
+  <circle cx="270" cy="256" r="148" fill="url(#crescent)"/>
+  <!-- Shadow disc that cuts a crescent -->
+  <circle cx="318" cy="230" r="128" fill="#0b0612"/>
+  <!-- Soft highlight rim -->
+  <path d="M188 170 A148 148 0 0 0 188 342" fill="none" stroke="#e8deff" stroke-width="10" stroke-linecap="round" opacity="0.55"/>
+</svg>

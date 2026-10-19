@@ -1,0 +1,7 @@
+<!-- In app/android/app/src/main/AndroidManifest.xml on the <application> element: -->
+<application
+    android:label="Umbra"
+    android:name="${applicationName}"
+    android:icon="@mipmap/ic_launcher">
+    <!-- … -->
+</application>

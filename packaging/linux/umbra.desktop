@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Umbra
+GenericName=Messenger
+Comment=Peer-to-peer end-to-end encrypted messenger with voice and video calls
+Exec=umbra %u
+Icon=io.github.femboynyx.umbra
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+MimeType=x-scheme-handler/umbra;
+StartupNotify=true
+StartupWMClass=umbra
+Keywords=chat;messenger;p2p;encrypted;secure;calls;

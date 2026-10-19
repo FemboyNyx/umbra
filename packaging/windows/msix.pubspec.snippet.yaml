@@ -1,0 +1,15 @@
+# Add under app/pubspec.yaml (dev_dependency + msix_config). Copilot owns app/.
+#
+# dev_dependencies:
+#   msix: ^3.16.0
+#
+# Then at the bottom of pubspec.yaml:
+
+msix_config:
+  display_name: Umbra
+  publisher_display_name: FemboyNyx
+  identity_name: io.github.femboynyx.umbra
+  msix_version: 0.1.0.0
+  logo_path: packaging/icons/umbra-256.png
+  capabilities: internetClient, microphone, webcam
+  # certificate_path / certificate_password: set only in CI from WINDOWS_CERT_* secrets

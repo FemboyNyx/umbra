@@ -1,0 +1,297 @@
+name: CI
+
+on:
+  push:
+    branches: [main, backup]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  detect:
+    name: Detect packages
+    runs-on: ubuntu-latest
+    outputs:
+      has_core: ${{ steps.check.outputs.has_core }}
+      has_app: ${{ steps.check.outputs.has_app }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f core/Cargo.toml ]; then
+            echo "has_core=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_core=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f app/pubspec.yaml ]; then
+            echo "has_app=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_app=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  rust-core:
+    name: Rust core (fmt / clippy / test)
+    needs: detect
+    if: needs.detect.outputs.has_core == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test --all-features
+
+  flutter-analyze:
+    name: Flutter analyze / test
+    needs: detect
+    if: needs.detect.outputs.has_app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: pub get
+        working-directory: app
+        run: flutter pub get
+      - name: analyze
+        working-directory: app
+        run: flutter analyze
+      - name: test
+        working-directory: app
+        run: flutter test
+
+  build-android:
+    name: Build Android APK
+    needs: detect
+    if: needs.detect.outputs.has_app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: dtolnay/rust-toolchain@stable
+        if: needs.detect.outputs.has_core == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: needs.detect.outputs.has_core == 'true'
+        with:
+          workspaces: core
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+          link-to-sdk: true
+      - name: Install Android Rust targets (for flutter_rust_bridge / cargokit)
+        if: needs.detect.outputs.has_core == 'true'
+        run: |
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android \
+            i686-linux-android
+      - name: Export NDK for cargokit
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: pub get
+        working-directory: app
+        run: flutter pub get
+      - name: Configure Android signing
+        working-directory: app
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/upload-keystore.jks
+            {
+              echo "storePassword=${ANDROID_KEYSTORE_PASSWORD}"
+              echo "keyPassword=${ANDROID_KEY_PASSWORD}"
+              echo "keyAlias=${ANDROID_KEY_ALIAS}"
+              echo "storeFile=upload-keystore.jks"
+            } > android/key.properties
+            echo "Using release keystore from secrets."
+          else
+            echo "ANDROID_KEYSTORE_* secrets missing; Flutter will use debug signing."
+          fi
+      - name: Build APK
+        working-directory: app
+        run: |
+          if [ -f android/key.properties ]; then
+            flutter build apk --release
+          else
+            flutter build apk --debug
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: umbra-android-apk
+          path: |
+            app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows zip
+    needs: detect
+    if: needs.detect.outputs.has_app == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: pub get
+        working-directory: app
+        run: flutter pub get
+      - name: Build Windows
+        working-directory: app
+        run: flutter build windows --release
+      - name: Package zip
+        shell: pwsh
+        env:
+          UMBRA_VERSION: ${{ github.sha }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          ./packaging/windows/build-zip.ps1 `
+            -BundleDir app/build/windows/x64/runner/Release `
+            -OutFile dist/umbra-windows-x64.zip `
+            -Version $env:UMBRA_VERSION.Substring(0,7)
+      - name: Optional MSIX
+        shell: pwsh
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_BASE64 -or -not $env:WINDOWS_CERT_PASSWORD) {
+            Write-Host "WINDOWS_CERT_* secrets missing; shipping zip only."
+            exit 0
+          }
+          if (-not (Test-Path app/pubspec.yaml)) { exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "umbra.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          Push-Location app
+          # Requires msix pub package + msix_config (Copilot). Skip cleanly if absent.
+          $pubspec = Get-Content pubspec.yaml -Raw
+          if ($pubspec -notmatch '(?m)^\s*msix:') {
+            Write-Host "msix package not configured in pubspec yet; shipping zip only."
+            Pop-Location
+            exit 0
+          }
+          flutter pub get
+          $env:MSIX_CERTIFICATE_PATH = $pfx
+          $env:MSIX_CERTIFICATE_PASSWORD = $env:WINDOWS_CERT_PASSWORD
+          flutter pub run msix:create
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item app/build/windows/x64/runner/Release/*.msix dist/ -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: umbra-windows
+          path: |
+            dist/*.zip
+            dist/*.msix
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux tar.gz / AppImage
+    needs: detect
+    if: needs.detect.outputs.has_app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev fuse libfuse2
+      - name: Install appimagetool
+        run: |
+          curl -fsSL -o /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: pub get
+        working-directory: app
+        run: flutter pub get
+      - name: Build Linux
+        working-directory: app
+        run: flutter build linux --release
+      - name: Package tar.gz + AppImage
+        env:
+          UMBRA_VERSION: ${{ github.sha }}
+          DEST_DIR: ${{ github.workspace }}/dist
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          VER="${UMBRA_VERSION:0:7}"
+          export UMBRA_VERSION="$VER"
+          BUNDLE=app/build/linux/x64/release/bundle
+          packaging/linux/build-tarball.sh "$BUNDLE" "dist/umbra-${VER}-linux-x64.tar.gz"
+          packaging/linux/build-appimage.sh "$BUNDLE" "dist/Umbra-${VER}-x86_64.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: umbra-linux
+          path: |
+            dist/*.tar.gz
+            dist/*.AppImage
+          if-no-files-found: error
+
+  ci-gate:
+    name: CI gate
+    needs: [detect, rust-core, flutter-analyze, build-android, build-windows, build-linux]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate
+        run: |
+          set -euo pipefail
+          echo "has_core=${{ needs.detect.outputs.has_core }}"
+          echo "has_app=${{ needs.detect.outputs.has_app }}"
+          # Skipped jobs (missing folders) are fine; failed required jobs are not.
+          for result in \
+            "${{ needs.rust-core.result }}" \
+            "${{ needs.flutter-analyze.result }}" \
+            "${{ needs.build-android.result }}" \
+            "${{ needs.build-windows.result }}" \
+            "${{ needs.build-linux.result }}"
+          do
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "Job failed with result=$result"
+                exit 1
+                ;;
+            esac
+          done
+          echo "CI gate passed."
