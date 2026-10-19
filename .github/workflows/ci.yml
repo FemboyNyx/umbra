@@ -64,6 +64,10 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --locked --all-features
+      - name: clippy + test (--features tor)
+        run: |
+          cargo clippy --locked --workspace --all-targets --features tor -- -D warnings
+          cargo test --locked --workspace --features tor
 
   flutter-analyze:
     name: Flutter analyze / test
