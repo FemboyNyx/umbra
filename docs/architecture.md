@@ -232,7 +232,7 @@ secrets. The details are in [ci.md](ci.md).
 ## Open decisions
 
 1. Who runs the bootstrap and relay nodes, and whether core ships defaults.
-2. Groups: Megolm, and how rotation works.
+2. Groups: Megolm, and how rotation works. Proposed in [servers.md](servers.md).
 3. Attachments: how they're sent, the cipher, and size limits.
 4. Padding message sizes.
 5. TURN policy for calls, and what the UI says about the IP leak.
