@@ -6,7 +6,6 @@ import 'call_session.dart';
 import 'ice_config.dart';
 import 'signaling.dart';
 
-/// Thrown when the user must acknowledge IP risk or configure TURN first.
 class CallPrivacyException implements Exception {
   CallPrivacyException(this.code, this.message);
   final String code;
@@ -15,10 +14,7 @@ class CallPrivacyException implements Exception {
   String toString() => 'CallPrivacyException($code): $message';
 }
 
-/// App-facing API for placing and receiving 1:1 calls.
-///
-/// Wire [transport] to core so signals travel on the E2E channel.
-/// Provide [localPeerId] from core identity.
+/// App-facing API. Wire [transport] to core `send_signal`; peer id from `self_info()`.
 class CallController {
   CallController({
     required this.localPeerId,
@@ -35,10 +31,7 @@ class CallController {
 
   CallSession? active;
   final _incoming = StreamController<CallSession>.broadcast();
-
-  /// Fires when a remote invite arrives (show accept/decline UI).
   Stream<CallSession> get incomingCalls => _incoming.stream;
-
   final _rng = Random.secure();
 
   String _newCallId() {
@@ -48,10 +41,7 @@ class CallController {
 
   void _assertMayStartMedia() {
     if (privacy.shouldShowPreCallWarning) {
-      throw CallPrivacyException(
-        'ack_required',
-        preCallIpWarningShort,
-      );
+      throw CallPrivacyException('ack_required', preCallIpWarningShort);
     }
     if (iceConfig.relayOnlyBlocked) {
       throw CallPrivacyException(
@@ -61,19 +51,14 @@ class CallController {
     }
   }
 
-  /// User confirmed the IP / Tor disclosure (app shows [preCallIpWarning]).
-  void acknowledgeIpRisk() {
-    privacy.acknowledgeIpRisk = true;
-  }
+  void acknowledgeIpRisk() => privacy.acknowledgeIpRisk = true;
 
-  /// Toggle relay-only (force TURN). Copies policy onto [iceConfig].
   void setRelayOnly(bool enabled) {
     privacy.relayPolicy =
         enabled ? CallRelayPolicy.relayOnly : CallRelayPolicy.allowDirect;
     iceConfig = iceConfig.withRelayPolicy(privacy.relayPolicy);
   }
 
-  /// Place an outbound call.
   Future<CallSession> startCall({
     required String remotePeerId,
     CallMediaMode mediaMode = CallMediaMode.audioOnly,
@@ -96,22 +81,26 @@ class CallController {
     );
     await session.initRenderers();
     active = session;
-    await session.startAsCaller();
+    try {
+      await session.startAsCaller();
+    } catch (_) {
+      // Session already marked failed (unreachable peer / payload).
+      rethrow;
+    }
     return session;
   }
 
-  /// Feed every core-delivered call signal into the controller.
   Future<void> handleSignal(Map<String, Object?> json) async {
     final msg = CallSignalMessage.parse(json);
     if (msg == null) return;
-    if (msg.toPeerId != localPeerId) return;
+    if (msg.toPeerId.isNotEmpty && msg.toPeerId != localPeerId) return;
 
-    if (msg.type == CallSignalType.invite) {
+    if (msg.kind == SignalKind.ringing) {
       if (active != null &&
           active!.state != CallSessionState.ended &&
           active!.state != CallSessionState.failed) {
         await transport.send(CallSignalMessage(
-          type: CallSignalType.reject,
+          kind: SignalKind.busy,
           callId: msg.callId,
           fromPeerId: localPeerId,
           toPeerId: msg.fromPeerId,
@@ -141,13 +130,11 @@ class CallController {
     await session.onRemoteSignal(msg);
   }
 
-  /// Accept an incoming call (runs the same privacy checks as outbound).
   Future<void> acceptIncoming({bool skipPrivacyCheck = false}) async {
     if (!skipPrivacyCheck) _assertMayStartMedia();
     await active?.accept();
   }
 
-  /// Replace TURN servers from user settings (never hardcode secrets).
   void setTurnServers(List<IceServer> turn) {
     iceConfig = iceConfig.withTurn(turn);
   }

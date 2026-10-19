@@ -1,4 +1,3 @@
-/// Umbra voice/video calls (flutter_webrtc + core signaling).
 library umbra_calls;
 
 export 'src/call_controller.dart';
