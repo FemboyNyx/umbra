@@ -240,6 +240,38 @@ class ConversationSummary {
   String get label => displayName.trim().isEmpty ? peerId : displayName;
 }
 
+/// A DM from a co-member who is not a contact yet.
+///
+/// Kept out of the inbox until the user accepts. [serverName] is the server
+/// the message came from.
+class MessageRequest {
+  const MessageRequest({
+    required this.id,
+    required this.peerId,
+    required this.displayName,
+    required this.serverId,
+    required this.serverName,
+    required this.body,
+    required this.timestampMs,
+    required this.card,
+  });
+
+  final String id;
+  final String peerId;
+  final String displayName;
+  final String serverId;
+  final String serverName;
+  final String body;
+  final int timestampMs;
+  final ContactCard card;
+
+  String get label {
+    final name = displayName.trim();
+    if (name.isNotEmpty) return name;
+    return card.label;
+  }
+}
+
 class NetworkInfo {
   const NetworkInfo({
     this.running = false,
@@ -288,6 +320,16 @@ class ContactOffline extends CoreEvent {
 class ContactRequest extends CoreEvent {
   const ContactRequest(this.card);
   final ContactCard card;
+}
+
+/// App-side stand-in for the `MessageRequest` event in servers.md.
+///
+/// Phase 0 core does not emit this. A co-member `Text` raises
+/// [ContactRequest] and stores nothing. The mock emits this so the collapsed
+/// count can update without touching the inbox.
+class MessageRequestArrived extends CoreEvent {
+  const MessageRequestArrived(this.request);
+  final MessageRequest request;
 }
 
 class SignalEvent extends CoreEvent {

@@ -148,6 +148,32 @@ class FrbUmbraCore implements UmbraCore {
       _guard(() => rust_api.markRead(peerId: peerId, upTo: upTo));
 
   @override
+  Future<List<app.MessageRequest>> listMessageRequests() async {
+    // docs/servers.md: a Text DM from a co-member who is not a contact is a
+    // message request. Phase 0 core does not store one. It returns
+    // Rejected(NotAContact) and raises ContactRequest (docs/core-api.md).
+    // list_message_requests is not in the FFI, so the real backend has
+    // nothing to list until that API exists.
+    return const [];
+  }
+
+  @override
+  Future<void> acceptMessageRequest(String id) async {
+    // [id] is the request the FFI cannot see yet.
+    throw const app.UmbraException(
+      'message requests are not in the core FFI yet',
+    );
+  }
+
+  @override
+  Future<void> dismissMessageRequest(String id) async {
+    // [id] is the request the FFI cannot see yet.
+    throw const app.UmbraException(
+      'message requests are not in the core FFI yet',
+    );
+  }
+
+  @override
   Future<void> sendSignal({
     required String peerId,
     required String callId,

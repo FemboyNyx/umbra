@@ -249,6 +249,18 @@ class _OrderCore implements UmbraCore {
       inner.markRead(peerId, upTo);
 
   @override
+  Future<List<MessageRequest>> listMessageRequests() =>
+      inner.listMessageRequests();
+
+  @override
+  Future<void> acceptMessageRequest(String id) =>
+      inner.acceptMessageRequest(id);
+
+  @override
+  Future<void> dismissMessageRequest(String id) =>
+      inner.dismissMessageRequest(id);
+
+  @override
   Future<NetworkInfo> networkStatus() => inner.networkStatus();
 
   @override

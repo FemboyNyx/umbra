@@ -35,6 +35,7 @@ class UmbraController extends ChangeNotifier {
   List<Contact> contacts = const [];
   List<ConversationSummary> conversations = const [];
   List<ContactCard> pending = const [];
+  List<MessageRequest> messageRequests = const [];
   final Map<String, List<Message>> threads = {};
 
   final Set<String> _seenRequests = {};
@@ -291,6 +292,7 @@ class UmbraController extends ChangeNotifier {
     _listening = false;
     started = false;
     pending = const [];
+    messageRequests = const [];
     _seenRequests.clear();
     await bootstrap();
   }
@@ -354,6 +356,26 @@ class UmbraController extends ChangeNotifier {
 
   Future<void> setVerified(String peerId, {required bool verified}) async {
     await _core.setVerified(peerId, verified: verified);
+    await _reloadLists();
+    notifyListeners();
+  }
+
+  Future<void> acceptMessageRequest(String id) async {
+    String? peerId;
+    for (final request in messageRequests) {
+      if (request.id == id) peerId = request.peerId;
+    }
+    await _core.acceptMessageRequest(id);
+    // Accepting does not mark the text read, even if that chat is open.
+    if (peerId != null) {
+      await _reloadThread(peerId);
+    }
+    await _reloadLists();
+    notifyListeners();
+  }
+
+  Future<void> dismissMessageRequest(String id) async {
+    await _core.dismissMessageRequest(id);
     await _reloadLists();
     notifyListeners();
   }
@@ -422,6 +444,10 @@ class UmbraController extends ChangeNotifier {
 
   void _onEvent(CoreEvent event) {
     switch (event) {
+      case MessageRequestArrived():
+        // Count only. The body stays off the inbox and off any notice.
+        unawaited(_refreshLists());
+        return;
       case ContactRequest(:final card):
         if (_dismissed.contains(card.peerId) ||
             _seenRequests.contains(card.peerId)) {
@@ -510,6 +536,7 @@ class UmbraController extends ChangeNotifier {
   Future<void> _reloadLists() async {
     contacts = await _core.listContacts();
     conversations = await _core.listConversations();
+    messageRequests = await _core.listMessageRequests();
   }
 
   Future<void> _reloadThread(String peerId) async {
