@@ -1,0 +1,7 @@
+# Only honoured by rustup's cargo/rustc proxies (put ~/.cargo/bin ahead of
+# /usr/bin on the dev box; the system rustc 1.85 is too old for vodozemac 0.11).
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android"]
+profile = "minimal"
