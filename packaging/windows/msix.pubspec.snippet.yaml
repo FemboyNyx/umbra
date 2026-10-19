@@ -10,6 +10,6 @@ msix_config:
   publisher_display_name: FemboyNyx
   identity_name: io.github.femboynyx.umbra
   msix_version: 0.1.0.0
-  logo_path: packaging/icons/umbra-256.png
+  logo_path: ../packaging/icons/umbra-256.png   # relative to app/
   capabilities: internetClient, microphone, webcam
   # certificate_path / certificate_password: set only in CI from WINDOWS_CERT_* secrets
