@@ -91,6 +91,29 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: dtolnay/rust-toolchain@stable
+        if: needs.detect.outputs.has_core == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: needs.detect.outputs.has_core == 'true'
+        with:
+          workspaces: core
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26d
+          link-to-sdk: true
+      - name: Install Android Rust targets (for flutter_rust_bridge / cargokit)
+        if: needs.detect.outputs.has_core == 'true'
+        run: |
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android \
+            i686-linux-android
+      - name: Export NDK for cargokit
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
