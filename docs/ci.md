@@ -75,8 +75,9 @@ Java 17, before Flutter):
 2. **Rust for Android** — only when `has_core == true`:
    - `rustup toolchain install` in `core/` (picks channel/components/targets from `rust-toolchain.toml`)
    - `Swatinem/rust-cache@v2` with `workspaces: core`
-   - `rustup target add` for `aarch64-linux-android`, `armv7-linux-androideabi`,
-     `x86_64-linux-android`, and `i686-linux-android`
+   - Android targets (`aarch64-linux-android`, `armv7-linux-androideabi`,
+     `x86_64-linux-android`) come from the toml's `targets`; there is no separate
+     `rustup target add` step and no `i686-linux-android`
 3. **`perl` and `make`** — always installed (`sudo apt-get install -y perl make`).
    SQLCipher builds OpenSSL as part of the native stack and needs both.
 
