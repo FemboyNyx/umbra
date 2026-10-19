@@ -1230,7 +1230,7 @@ impl Core {
                 v.retain(|(x, _)| *x != k);
             }
         }
-        let p: Payload = match serde_json::from_slice(&pt) {
+        let p: Payload = match decode_payload(&pt) {
             Ok(p) => p,
             Err(_) => return Ok(MsgResponse::Rejected(RejectReason::Malformed)),
         };
@@ -1447,7 +1447,7 @@ impl Core {
     ) -> Result<(), DeliverError> {
         let peer = parse_peer(&contact.peer_id)?;
         self.greet(net, peer).await?;
-        let pt = serde_json::to_vec(p).map_err(anyhow::Error::from)?;
+        let pt = encode_payload(p).map_err(anyhow::Error::from)?;
         for _ in 0..2 {
             self.ensure_session(net, contact, peer).await?;
             let (t, c) = self.crypto.encrypt(&contact.peer_id, &pt)?;

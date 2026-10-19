@@ -381,6 +381,18 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
   seq?, prev?, expires_at?}`; `to` must be
   the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per
   peer, pre-key messages matched by session id.
+* **Padding** ([message-protection.md](message-protection.md#padding)):
+  every Olm plaintext core sends is padded, before encryption, to the next
+  bucket of **256 B, 1 KiB, 4 KiB, 16 KiB or 64 KiB**; a plaintext over 64 KiB
+  (a full 64 KiB text or signal plus JSON framing and escaping) rounds up to a
+  multiple of 64 KiB, well under the 1 MiB codec cap. The padding is trailing
+  ASCII spaces after the JSON, which every JSON parser skips, so it is
+  backward-compatible both ways: older cores parse padded payloads, and new
+  cores accept unpadded ones. The receiver strips trailing whitespace before
+  parsing. The usable caps don't change (text 64 KiB, signal payload 64 KiB,
+  server data 64 KiB). Padding hides lengths within a bucket, not message
+  counts or timing. (`proto::{PAD_BUCKETS, padded_len, encode_payload,
+  decode_payload}`.)
 * **Server payload carrier (Phase 0)**: `PayloadBody::Server { server_id,
   kind: ServerPayloadKind, data }`, with `kind` one of `ServerKey |
   ServerKeyForward | ServerKeyRequest | ServerManifest | ServerOp` and `data`
