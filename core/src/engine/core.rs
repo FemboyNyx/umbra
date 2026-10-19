@@ -1151,6 +1151,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_and_busy_signals_round_trip() {
+        // Wire names must match calls/lib/src/signaling.dart.
+        for (kind, wire) in [(SignalKind::Accept, "Accept"), (SignalKind::Busy, "Busy")] {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{wire}\""));
+            assert_eq!(serde_json::from_str::<SignalKind>(&json).unwrap(), kind);
+        }
+
+        // Encrypted end to end through the inbound Olm path.
+        let (a, mut rx, _da) = open(1);
+        let (b, _rb, _db) = open(2);
+        befriend(&a, &b).await;
+        claim_and_send(&a, &b, "session");
+        drain(&mut rx);
+        let pa = a.peer_id().to_base58();
+        for kind in [SignalKind::Accept, SignalKind::Busy] {
+            let p = Payload {
+                v: 1,
+                to: pa.clone(),
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: now_ms(),
+                body: PayloadBody::Signal {
+                    call_id: "c1".into(),
+                    kind,
+                    payload: "busy".into(),
+                },
+            };
+            let (t, c) = b
+                .crypto
+                .encrypt(&pa, &serde_json::to_vec(&p).unwrap())
+                .unwrap();
+            assert_eq!(
+                a.handle_msg(b.peer_id(), MsgRequest::Olm { t, c }),
+                MsgResponse::Delivered
+            );
+            let evs = drain(&mut rx);
+            assert!(
+                evs.iter()
+                    .any(|e| matches!(e, CoreEvent::Signal { kind: k, call_id, .. }
+                    if *k == kind && call_id == "c1")),
+                "{kind:?} not delivered: {evs:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn hello_flood_is_deduped_and_throttled() {
         let (a, mut rx, _da) = open_lim(
             1,

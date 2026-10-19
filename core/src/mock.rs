@@ -337,18 +337,21 @@ impl MockCore {
     ) -> Result<()> {
         self.require_contact(&peer_id)?;
         match kind {
-            SignalKind::Offer => {
+            // calls/ flow: Ringing -> Accept -> Offer -> Answer.
+            SignalKind::Ringing => {
                 self.later(
                     300,
                     CoreEvent::Signal {
-                        peer_id: peer_id.clone(),
-                        call_id: call_id.clone(),
-                        kind: SignalKind::Ringing,
+                        peer_id,
+                        call_id,
+                        kind: SignalKind::Accept,
                         payload: String::new(),
                     },
                 );
+            }
+            SignalKind::Offer => {
                 self.later(
-                    1200,
+                    600,
                     CoreEvent::Signal {
                         peer_id,
                         call_id,
@@ -368,7 +371,11 @@ impl MockCore {
                     },
                 );
             }
-            _ => {}
+            SignalKind::Answer
+            | SignalKind::IceCandidate
+            | SignalKind::Reject
+            | SignalKind::Accept
+            | SignalKind::Busy => {}
         }
         Ok(())
     }

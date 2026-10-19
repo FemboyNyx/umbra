@@ -146,7 +146,8 @@ async fn send_signal(peer_id: String, call_id: String, kind: SignalKind, payload
 Olm-encrypted, delivered directly, **not** stored or queued: returns an error
 if the peer is unreachable right now (treat as "call failed"). Incoming
 signals arrive as `CoreEvent::Signal`. `payload` is opaque to core (put SDP /
-ICE JSON in it), max 64 KiB.
+ICE JSON in it), max 64 KiB. All kinds, including `Accept` and `Busy`, take
+the same path: never queued, same size cap.
 
 ## Types
 
@@ -169,7 +170,11 @@ struct Message { id, peer_id, outgoing: bool, body, timestamp_ms: i64, status: D
 struct ConversationSummary { peer_id, display_name, last_message: Option<Message>, unread_count: u32, updated_at_ms: i64 }
 struct NetworkInfo { running: bool, listen_addrs: Vec<String>, connected_peers: u32, relay_reservations: u32 }
 enum DeliveryStatus { Sent, Delivered, Failed, Received }
-enum SignalKind { Offer, Answer, IceCandidate, Hangup, Ringing, Reject }
+enum SignalKind { Offer, Answer, IceCandidate, Hangup, Ringing, Reject, Accept, Busy }
+// Wire (JSON in the Olm payload) = variant name: "Offer", "Answer",
+// "IceCandidate", "Hangup", "Ringing", "Reject", "Accept", "Busy";
+// must match calls/lib/src/signaling.dart. Flow (calls/docs/signaling.md):
+// Ringing -> Accept | Busy | Reject -> Offer -> Answer -> IceCandidate* -> Hangup
 enum CoreEvent {
     MessageReceived { message: Message },
     MessageStatus { id: MessageId, peer_id: String, status: DeliveryStatus },
@@ -308,5 +313,5 @@ Embedded arti state (`tor` feature):
 * ~2 s after `init` a `ContactRequest` from "Mock Bot" arrives.
 * `add_contact` -> `ContactOnline` after 300 ms.
 * `send_text` -> `Sent`, `Delivered` (~400 ms), then an `echo: <text>` reply (~1 s).
-* `send_signal(Offer)` -> `Ringing`, then `Answer` with payload `mock-answer-sdp`;
-  `Hangup` is echoed back.
+* `send_signal(Ringing)` -> `Accept`; `send_signal(Offer)` -> `Answer` with
+  payload `mock-answer-sdp`; `Hangup` is echoed back; other kinds are ignored.
