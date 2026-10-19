@@ -26,7 +26,7 @@ runs on the same ref.
 | `detect` | always | Sets `has_core` / `has_app` from `core/Cargo.toml` and `app/pubspec.yaml` | — |
 | `rust-core` | `has_core == true` | `cargo fmt --check`, `clippy -D warnings`, `cargo test --all-features` in `core/` (stable toolchain + Swatinem/rust-cache) | — |
 | `flutter-analyze` | `has_app == true` | `flutter pub get`, `analyze`, `test` in `app/` | — |
-| `build-android` | `has_app == true` | Java 17, configure signing from secrets (or debug fallback), `flutter build apk`, upload APK(s) | `umbra-android-apk` |
+| `build-android` | `has_app == true` | Java 17, NDK r26d + optional Android Rust targets (see below), configure signing (or debug fallback), `flutter build apk`, upload APK(s) | `umbra-android-apk` |
 | `build-windows` | `has_app == true` | `flutter build windows --release`, then `packaging/windows/build-zip.ps1`; optional MSIX when cert secrets + `msix` in pubspec | `umbra-windows` (`dist/*.zip`, optional `dist/*.msix`) |
 | `build-linux` | `has_app == true` | GTK/clang/ninja + fuse deps, install `appimagetool`, `flutter build linux --release`, then `packaging/linux/build-tarball.sh` and `build-appimage.sh` | `umbra-linux` (`dist/*.tar.gz`, `dist/*.AppImage`) |
 | `ci-gate` | always | Fails the workflow if any non-skipped package job failed; skipped jobs (missing `core/` or `app/`) are OK | — |
@@ -45,10 +45,34 @@ failed, and `ci-gate` still passes.
   `Umbra-abc1234-x86_64.AppImage`, `umbra-abc1234-windows-x64.zip` (CI writes the
   zip as `dist/umbra-windows-x64.zip` but passes the short SHA as `-Version`).
 
+**Android NDK and Rust targets (FRB / cargokit)**
+
+Both `ci.yml` and `release.yml` prepare `build-android` the same way (after
+Java 17, before Flutter):
+
+1. **NDK r26d** — always, via `nttld/setup-ndk@v1` with `ndk-version: r26d` and
+   `link-to-sdk: true`. A follow-up step exports `ANDROID_NDK_HOME` and
+   `ANDROID_NDK_ROOT` from `steps.setup-ndk.outputs.ndk-path` into `$GITHUB_ENV`
+   so cargokit can find the NDK.
+2. **Rust for Android** — only when `has_core == true`:
+   - `dtolnay/rust-toolchain@stable` (rustup-managed stable, not the image's
+     system `rustc`)
+   - `Swatinem/rust-cache@v2` with `workspaces: core`
+   - `rustup target add` for `aarch64-linux-android`, `armv7-linux-androideabi`,
+     `x86_64-linux-android`, and `i686-linux-android`
+
+The host `rust-core` job likewise installs tooling through
+`dtolnay/rust-toolchain@stable`.
+
+**Rust version**
+
+Current libp2p (and related crates) need a recent compiler. Use **Rust 1.88 or
+newer**. CI must install via **rustup stable** (`dtolnay/rust-toolchain@stable`),
+not the distro/`apt` `rustc` on the runner — the system package is often too
+old for this stack.
+
 **Pending / not wired yet**
 
-- No explicit Android NDK / `flutter_rust_bridge` (cargokit) setup — may be
-  required once `core/` is linked into the Flutter build.
 - MSIX still needs Copilot to add the `msix` pub dependency + `msix_config` in
   `app/pubspec.yaml`; without that, Windows stays zip-only even if cert secrets
   exist.
@@ -69,7 +93,7 @@ failed, and `ci-gate` still passes.
 |-----|------|------|
 | `detect` | always | Same `has_core` / `has_app` detection as CI |
 | `rust-core` | `has_core` | `cargo test --all-features` (no fmt/clippy on the release path) |
-| `build-android` | `has_app` | Same signing + APK build as CI; artifact `umbra-android-apk` |
+| `build-android` | `has_app` | Same NDK / Rust-target / signing + APK build as CI; artifact `umbra-android-apk` |
 | `build-windows` | `has_app` | Same `build-zip.ps1` + optional MSIX as CI; version from tag (`v0.1.0` → `0.1.0`); artifact `umbra-windows` |
 | `build-linux` | `has_app` | Same `appimagetool` + `build-tarball.sh` / `build-appimage.sh` as CI; version from tag with leading `v` stripped; artifact `umbra-linux` |
 | `publish` | after builds (always, if detect succeeded) | Download artifacts, flatten into `release-assets/`, write `SHA256SUMS`, create GitHub Release via `softprops/action-gh-release@v2` |
@@ -251,6 +275,8 @@ Optional env for the shell scripts: `UMBRA_VERSION`, `DEST_DIR`, `APPIMAGETOOL`,
 | `ci-gate` / release publish fails | A build job `failed` or `cancelled` (not `skipped`) | Open the failed job log; fix compile/test errors |
 | Android APK is debug / won't install as update over release | Signing secrets missing or `key.properties` not consumed by Gradle | Set all four `ANDROID_*` secrets; confirm Copilot applied the signing snippet |
 | `key.properties` / `.jks` shows up in `git status` | Accidental local signing files | They are gitignored; delete or move them out of the tree — never commit |
+| Android native / cargokit build fails looking for NDK | `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` not set or wrong NDK | Confirm `nttld/setup-ndk` ran with `r26d` and the export step; local builds should point those env vars at an r26d install |
+| `cargo` / FRB fails with edition or libp2p compile errors on CI | Toolchain older than 1.88, or system `rustc` used instead of rustup | Workflows use `dtolnay/rust-toolchain@stable`; locally run `rustup update stable` and ensure `rustc` is from rustup (`which rustc`) |
 | Linux Flutter build fails on missing GTK / clang | Dep install step failed | Job must be `ubuntu-latest` with the `apt-get` deps from the workflow (including `fuse` / `libfuse2` for AppImage) |
 | AppImage step fails on `appimagetool` | Download/install step failed or FUSE unavailable | Check the "Install appimagetool" log; confirm `fuse`/`libfuse2` installed |
 | Windows zip empty / upload error | `flutter build windows` failed or `build-zip.ps1` path wrong | Confirm `app/build/windows/x64/runner/Release` exists; packaging scripts must be on the branch |
