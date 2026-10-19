@@ -18,3 +18,8 @@ Android, Windows, Linux (same stack as the rest of Umbra).
 - Media is DTLS-SRTP end-to-end between peers once ICE connects.
 - Signaling payloads must be sent only through core’s E2E channel.
 - TURN credentials, if any, come from the user or their self-hosted config — never baked into the binary.
+
+## Privacy
+- Pre-call IP / Tor warning strings live in `call_privacy.dart`.
+- `CallController.setRelayOnly(true)` forces TURN-only ICE (`iceTransportPolicy: relay`).
+- TURN credentials are never hardcoded — set via `setTurnServers`.

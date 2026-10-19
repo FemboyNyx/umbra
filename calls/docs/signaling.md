@@ -27,3 +27,8 @@ Suggested core envelope (for Elite / Copilot to agree):
 - `send_app_message(peer_id, ns, body_bytes_or_json)`
 - Inbound callback/stream for `ns == umbra.call.v1`
 - Prefer not blocking the UI isolate
+
+## Privacy (threat model)
+- Call **media** cannot traverse Tor; ICE may expose peer IPs.
+- App must show [preCallIpWarning] before first call (and when Tor mode is on).
+- **Relay only** sets `iceTransportPolicy: relay` and requires user-configured TURN.
