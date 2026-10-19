@@ -12,4 +12,5 @@ msix_config:
   msix_version: 0.1.0.0
   logo_path: ../packaging/icons/umbra-256.png   # relative to app/
   capabilities: internetClient, microphone, webcam
-  # certificate_path / certificate_password: set only in CI from WINDOWS_CERT_* secrets
+  # Do NOT set certificate_path / certificate_password here; ci.yml/release.yml pass them
+  # as --certificate-path / --certificate-password flags from the WINDOWS_CERT_* secrets
