@@ -2,7 +2,7 @@
 //!
 //! Compiled only with `--features tor`.
 
-use crate::{multiaddr_to_target, TorError, TorTarget};
+use crate::{multiaddr_to_target, TorConfig, TorError, TorTarget};
 use arti_client::{DataStream, StreamPrefs, TorAddr, TorClient, TorClientConfig};
 use futures::future::BoxFuture;
 use libp2p::core::transport::{DialOpts, ListenerId, Transport, TransportError, TransportEvent};
@@ -22,11 +22,17 @@ pub struct TorTransport {
 }
 
 impl TorTransport {
-    /// Bootstrap an embedded Tor client with arti's default config (state and
-    /// cache under the platform data dir). Contacts the Tor network; cold start
-    /// can take several seconds.
+    /// Bootstrap with arti's platform-default state/cache dirs.
+    ///
+    /// Contacts the Tor network; cold start can take several seconds.
+    /// On Android prefer [`Self::bootstrapped_with`] and pass app-owned dirs.
     pub async fn bootstrapped() -> Result<Self, TorError> {
-        Self::with_config(TorClientConfig::default()).await
+        Self::bootstrapped_with(TorConfig::new()).await
+    }
+
+    /// Bootstrap using [`TorConfig`] (custom state/cache dirs for mobile).
+    pub async fn bootstrapped_with(config: TorConfig) -> Result<Self, TorError> {
+        Self::with_config(config.build_arti_config()?).await
     }
 
     pub async fn with_config(config: TorClientConfig) -> Result<Self, TorError> {
@@ -41,8 +47,7 @@ impl TorTransport {
 
     /// Dial a [`TorTarget`] directly (used by tests / non-libp2p callers).
     pub async fn connect_target(&self, target: TorTarget) -> Result<TorStream, TorError> {
-        let tor_addr = target_to_tor_addr(&target)
-            .map_err(|addr| TorError::Unsupported(addr))?;
+        let tor_addr = target_to_tor_addr(&target).map_err(TorError::Unsupported)?;
         let mut prefs = StreamPrefs::new();
         if matches!(target, TorTarget::Onion(..)) {
             prefs.connect_to_onion_services(arti_client::config::BoolOrAuto::Explicit(true));

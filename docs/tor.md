@@ -1,7 +1,7 @@
 # Optional Tor routing (spike)
 
-Status: **experimental spike** in `core/tor/` (`umbra-tor`). Not wired into
-Elite's swarm yet. AGPL-3.0 with the rest of Umbra.
+Status: **experimental spike** in `core/tor/` (`umbra-tor`). Ready for Elite to
+uncomment the workspace member. AGPL-3.0 with the rest of Umbra.
 
 ## Goal
 
@@ -22,43 +22,57 @@ Crate: [`libp2p-community-tor`](https://crates.io/crates/libp2p-community-tor) 0
 | | |
 | --- | --- |
 | Pros | Ready-made `Transport`, dials via arti |
-| Cons | Pins `arti-client ^0.24` and `libp2p ^0.53` (stale vs Umbra's stack); last release 2024-11; ~7k downloads; dial-only in practice |
+| Cons | Pins `arti-client ^0.24` and `libp2p ^0.53` (stale vs Umbra's stack); last release 2024-11; dial-only in practice |
 | Verdict | **Do not depend on it.** Re-check yearly; if it tracks current arti + libp2p, prefer it over maintaining our own wrapper. |
 
 ### 2. Embedded arti (`--features tor`) — implemented
 
-`umbra-tor` optionally depends on **arti-client 0.35** (MSRV 1.85.1, matches the
-dev box) and exposes `TorTransport`: a dial-only `libp2p::core::Transport` that
-bootstraps an in-process Tor client and dials TCP / DNS / onion3 multiaddrs.
+`umbra-tor` optionally depends on **arti-client 0.35** (rusqlite 0.37, same as
+`umbra_core`) and exposes `TorTransport`: a dial-only `libp2p::core::Transport`.
 
 ```text
 app  →  Elite transport builder  →  TorTransport (arti)  →  Tor network  →  peer
 ```
 
-Pinned on purpose:
+Pinned with Elite:
 
-- `libp2p = "=0.55.0"` — 0.56+ needs rustc ≥ 1.88; this environment has 1.85.1.
-- `arti-client = "=0.35.0"` — newer arti bumps MSRV past 1.85.
+- `libp2p` **0.55** (workspace pin)
+- `arti-client` **0.35** / rusqlite **0.37** (umbra-tor enables arti `static-sqlite` so CI/Android need no system libsqlite3)
+- MSRV **1.89** (vodozemac 0.11)
 
-Elite should align the workspace `libp2p` version with this pin, or bump both
-together when the CI/Android NDK rustc is newer.
+#### Custom state / cache dirs (Android)
 
-### 3. External SOCKS5 fallback — designed
+Arti's defaults use XDG-style paths that do not exist on Android. Pass app-owned
+directories via `TorConfig`:
 
-When embedding arti is too heavy (APK size, memory, battery), point a dial-only
-SOCKS transport at:
+```rust
+use umbra_tor::{TorConfig, TorTransport};
+
+let cfg = TorConfig::new()
+    .state_dir(files_dir.join("arti-state"))
+    .cache_dir(cache_dir.join("arti-cache"));
+let tor = TorTransport::bootstrapped_with(cfg).await?;
+```
+
+Under the hood this calls `TorClientConfigBuilder::from_directories` (literal
+`CfgPath`s). Both dirs must be set, or neither (platform defaults).
+
+### 3. External SOCKS5 fallback — designed (+ `/onion3` mapping)
+
+When embedding arti is too heavy, point a dial-only SOCKS transport at:
 
 - system `tor` `SocksPort` → `127.0.0.1:9050`
-- `arti proxy` SOCKS listen address (configurable; often `9150`)
+- `arti proxy` (often `9150`)
+- Orbot on Android
 
-See `umbra_tor::socks::{SocksProxy, TorMode}` and consider
-[`libp2p-socks5`](https://crates.io/crates/libp2p-socks5) for the actual
-transport. SOCKS5 CONNECT sends the **hostname** to the proxy, so there is no
-local DNS leak and `.onion` works.
+Helpers:
 
-**Critical:** use SOCKS **instead of** clearnet TCP on that swarm, not beside
-it. Mixing paths lets `identify` / advertised listen addrs correlate Tor and
-clearnet identities.
+- `multiaddr_to_socks_dest` / `target_to_socks_dest`
+- `/onion3/<56chars>:<port>` → SOCKS5 **domain** target `<56chars>.onion:port`
+  (ATYP domain — remote resolution, no local DNS)
+
+Prefer [`libp2p-socks5`](https://crates.io/crates/libp2p-socks5) for the actual
+transport. Use SOCKS **instead of** clearnet TCP on that swarm, not beside it.
 
 ## What works / what does not
 
@@ -66,79 +80,50 @@ clearnet identities.
 | --- | --- |
 | Dial clearnet TCP over Tor exits | Yes (embedded arti or SOCKS) |
 | Dial `/dns[4|6]/…/tcp/…` without local DNS | Yes |
-| Dial `/onion3/…` (v3 onion services) | Yes if arti built with `onion-service-client` (enabled under `tor`) or SOCKS to a Tor that supports onions |
-| Listen / host an onion service (inbound) | **Not in this spike.** arti can run onion services (`onion-service-service`), but long-lived stable `.onion` keys, mobile background limits, and libp2p `listen_on` integration are non-trivial. `TorTransport::listen_on` returns `MultiaddrNotSupported`. |
-| UDP / QUIC transports over Tor | **No.** Tor is TCP-only. |
-| WebRTC voice/video (`calls/`) over Tor | **No.** WebRTC needs UDP/ICE; keep calls on clearnet (still E2E via DTLS-SRTP) or accept “messaging over Tor, calls clearnet”. |
-| Mobile battery / binary size | Embedded arti is large (many deps, SQLite dir cache, rustls). Prefer SOCKS + system Tor on desktop; treat embedded as desktop/advanced opt-in until measured on Android. |
+| Dial `/onion3/…` (v3) via arti or SOCKS domain | Yes (`onion-service-client` under `tor`; SOCKS maps to `.onion`) |
+| Custom arti state/cache dirs | Yes (`TorConfig`) |
+| Listen / host an onion service | **Not yet.** `listen_on` → `MultiaddrNotSupported` |
+| UDP / QUIC over Tor | **No.** Tor is TCP-only |
+| WebRTC (`calls/`) over Tor | **No.** Keep A/V clearnet (still E2E DTLS-SRTP) |
+| Mobile size / battery | Prefer SOCKS + Orbot on Android until arti APK delta is measured |
 
 ## Privacy misuse warnings
 
-Copied in spirit from `libp2p-community-tor` — read before shipping a “Tor mode” UI:
-
 - A Tor transport does **not** make a normal libp2p node private by itself.
-- `identify`, exchanged listen addresses, and any clearnet transport on the same
-  swarm can link the Tor circuit to a real IP.
-- Prefer: Tor-only dials, no clearnet listen addrs advertised, careful about
-  what the app displays as “protected”.
+- `identify`, listen addrs, and any clearnet transport on the same swarm can
+  correlate Tor circuits with a real IP.
+- Prefer Tor-only dials and no clearnet listen addrs when “Tor mode” is on.
 
-## Wiring into Elite (`core/`)
+## Enable steps (Elite `core/`)
 
-Suggested once Elite’s transport builder exists (e.g. under `core/src/net/`):
+`core/tor/` already lives in-tree. In `core/Cargo.toml`:
 
-1. Add to the workspace / `core` Cargo.toml:
-
-   ```toml
-   umbra-tor = { path = "tor", default-features = false }
-   # optional:
-   # umbra-tor = { path = "tor", features = ["tor"] }
-   ```
-
-2. Branch on a runtime setting mapped to `umbra_tor::TorMode`:
-
-   ```rust
-   match tor_mode {
-       TorMode::Off => build_clearnet_tcp_quic(),
-       TorMode::EmbeddedArti => {
-           let tor = TorTransport::bootstrapped().await?;
-           // upgrade with noise + yamux exactly like TCP; do NOT or() with clearnet
-           upgrade(tor)
-       }
-       TorMode::Socks(proxy) => {
-           // e.g. libp2p_socks5::SocksTransport::new(proxy.listen)
-           upgrade(socks)
-       }
-   }
-   ```
-
-3. Keep `calls/` WebRTC on its own path; do not promise Tor for A/V in the UI
-   when Tor mode is on.
-
-4. Feature-gate Flutter/FFI: expose a `torAvailable` / `torMode` to Copilot’s
-   `app/` so the setting can hide itself on builds without `tor`.
+1. Uncomment the workspace member `"tor"`.
+2. Uncomment `umbra-tor = { path = "tor", optional = true, features = ["tor"] }`.
+3. Uncomment / add feature `tor = ["dep:umbra-tor"]`.
+4. Branch the transport builder on `TorMode`; for Android embedded mode call
+   `TorTransport::bootstrapped_with(TorConfig::…)`.
+5. Do **not** `or()` Tor with clearnet TCP.
+6. Keep `calls/` WebRTC on its own path; expose `torAvailable` / `torMode` to
+   Copilot's `app/` so the setting can hide itself when the feature is off.
 
 ## How to build / test this crate
 
-**Toolchain:** `rust-version = "1.88"` (libp2p's idna/icu transitive deps). On the Umbra
-dev box use rustup's stable (`~/.cargo/bin` ahead of `/usr/bin`, which may still be 1.85.1):
-
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$PATH"   # rustup stable >= 1.89
 cd core/tor
-cargo test                  # stub + multiaddr + SOCKS tests (no arti)
-cargo check --features tor  # pulls arti 0.35; needs network on first build
-cargo run --example dial_info -- /dns4/example.org/tcp/443
+cargo fmt
+cargo test
+cargo test --features tor
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features tor -- -D warnings
+cargo run --example dial_info -- /onion3/2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid:80
 ```
 
-No secrets belong here. arti’s state/cache dirs are local to the machine running
-the client.
+No secrets belong here. arti state/cache dirs are local to the device/user.
 
-## Open questions for Elite / Copilot / Gem
+## Open questions
 
-- Workspace rustc/MSRV: stay on 1.85 (current pins) or jump to ≥1.88 and unlock
-  libp2p 0.56+ / newer arti?
-- Product decision: Tor for messaging only, or delay Tor UI until onion **listen**
-  exists (true peer reachability without clearnet/relay)?
-- Android: measure arti APK delta before enabling `tor` in release builds;
-  otherwise ship SOCKS mode that expects Orbot / similar.
-- Gem (`calls/`): document in UX that calls leave Tor.
+- Product: Tor for messaging only until onion **listen** exists?
+- Android: measure arti APK delta vs Orbot SOCKS.
+- Gem (`calls/`): UX must say calls leave Tor when Tor mode is on.
