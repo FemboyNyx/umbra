@@ -65,7 +65,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1652846048;
+  int get rustContentHash => -281528992;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -84,7 +84,34 @@ abstract class RustLibApi extends BaseApi {
     required bool verified,
   });
 
+  Future<void> crateApiUmbraApproveJoin({
+    required String serverId,
+    required String peerId,
+    required bool approve,
+  });
+
+  Future<void> crateApiUmbraBan({
+    required String serverId,
+    required String peerId,
+  });
+
   Future<CoreConfig> crateApiTypesCoreConfigDefault();
+
+  Future<ServerChannel> crateApiUmbraCreateChannel({
+    required String serverId,
+    required String name,
+  });
+
+  Future<CreatedInvite> crateApiUmbraCreateInvite({
+    required String serverId,
+    required InviteOptions opts,
+  });
+
+  Future<CreatedServer> crateApiUmbraCreateServer({
+    required String name,
+    required List<String> recoveryKeys,
+    String? displayName,
+  });
 
   Stream<CoreEvent> crateApiUmbraEvents();
 
@@ -94,15 +121,43 @@ abstract class RustLibApi extends BaseApi {
     required CoreConfig cfg,
   });
 
+  Future<InviteOptions> crateApiTypesInviteOptionsDefault();
+
+  Future<List<JoinRequest>> crateApiUmbraJoinRequests({
+    required String serverId,
+  });
+
+  Future<ServerInfo> crateApiUmbraJoinServer({
+    required String link,
+    String? displayName,
+  });
+
+  Future<void> crateApiUmbraKick({
+    required String serverId,
+    required String peerId,
+  });
+
+  Future<void> crateApiUmbraLeaveServer({required String serverId});
+
+  Future<List<ServerChannel>> crateApiUmbraListChannels({
+    required String serverId,
+  });
+
   Future<List<Contact>> crateApiUmbraListContacts();
 
   Future<List<ConversationSummary>> crateApiUmbraListConversations();
+
+  Future<List<ServerMember>> crateApiUmbraListMembers({
+    required String serverId,
+  });
 
   Future<List<Message>> crateApiUmbraListMessages({
     required String peerId,
     PlatformInt64? before,
     required int limit,
   });
+
+  Future<List<ServerInfo>> crateApiUmbraListServers();
 
   Future<void> crateApiUmbraMarkRead({
     required String peerId,
@@ -113,11 +168,21 @@ abstract class RustLibApi extends BaseApi {
 
   Future<NetworkInfo> crateApiUmbraNetworkStatus();
 
+  Future<InvitePreview> crateApiUmbraParseInvite({required String link});
+
   Future<ContactCard> crateApiUmbraParseQr({required String payload});
 
   Future<void> crateApiUmbraRejectKeyChange({required String peerId});
 
   Future<void> crateApiUmbraRemoveContact({required String peerId});
+
+  Future<void> crateApiUmbraRenameChannel({
+    required String serverId,
+    required String channelId,
+    required String name,
+  });
+
+  Future<void> crateApiUmbraRevokeInvite({required String inviteId});
 
   Future<SelfInfo> crateApiUmbraSelfInfo();
 
@@ -133,7 +198,30 @@ abstract class RustLibApi extends BaseApi {
     required String body,
   });
 
+  Future<ServerInfo> crateApiUmbraServerInfo({required String serverId});
+
   Future<void> crateApiUmbraSetDisplayName({required String name});
+
+  Future<void> crateApiUmbraSetHistoryShared({
+    required String serverId,
+    required bool shared,
+  });
+
+  Future<void> crateApiUmbraSetInviteRoles({
+    required String serverId,
+    required List<ServerRole> roles,
+  });
+
+  Future<void> crateApiUmbraSetRole({
+    required String serverId,
+    required String peerId,
+    required ServerRole role,
+  });
+
+  Future<void> crateApiUmbraSetServerDisplayName({
+    required String serverId,
+    String? displayName,
+  });
 
   Future<void> crateApiUmbraSetVerified({
     required String peerId,
@@ -143,6 +231,11 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiUmbraStartNetwork();
 
   Future<void> crateApiUmbraStopNetwork();
+
+  Future<void> crateApiUmbraUnban({
+    required String serverId,
+    required String peerId,
+  });
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -216,6 +309,74 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<void> crateApiUmbraApproveJoin({
+    required String serverId,
+    required String peerId,
+    required bool approve,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(peerId, serializer);
+          sse_encode_bool(approve, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraApproveJoinConstMeta,
+        argValues: [serverId, peerId, approve],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraApproveJoinConstMeta => const TaskConstMeta(
+    debugName: "approve_join",
+    argNames: ["serverId", "peerId", "approve"],
+  );
+
+  @override
+  Future<void> crateApiUmbraBan({
+    required String serverId,
+    required String peerId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(peerId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraBanConstMeta,
+        argValues: [serverId, peerId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraBanConstMeta =>
+      const TaskConstMeta(debugName: "ban", argNames: ["serverId", "peerId"]);
+
+  @override
   Future<CoreConfig> crateApiTypesCoreConfigDefault() {
     return handler.executeNormal(
       NormalTask(
@@ -224,7 +385,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 5,
             port: port_,
           );
         },
@@ -243,6 +404,110 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "core_config_default", argNames: []);
 
   @override
+  Future<ServerChannel> crateApiUmbraCreateChannel({
+    required String serverId,
+    required String name,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(name, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_server_channel,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraCreateChannelConstMeta,
+        argValues: [serverId, name],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraCreateChannelConstMeta => const TaskConstMeta(
+    debugName: "create_channel",
+    argNames: ["serverId", "name"],
+  );
+
+  @override
+  Future<CreatedInvite> crateApiUmbraCreateInvite({
+    required String serverId,
+    required InviteOptions opts,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_box_autoadd_invite_options(opts, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_created_invite,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraCreateInviteConstMeta,
+        argValues: [serverId, opts],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraCreateInviteConstMeta => const TaskConstMeta(
+    debugName: "create_invite",
+    argNames: ["serverId", "opts"],
+  );
+
+  @override
+  Future<CreatedServer> crateApiUmbraCreateServer({
+    required String name,
+    required List<String> recoveryKeys,
+    String? displayName,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(name, serializer);
+          sse_encode_list_String(recoveryKeys, serializer);
+          sse_encode_opt_String(displayName, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_created_server,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraCreateServerConstMeta,
+        argValues: [name, recoveryKeys, displayName],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraCreateServerConstMeta => const TaskConstMeta(
+    debugName: "create_server",
+    argNames: ["name", "recoveryKeys", "displayName"],
+  );
+
+  @override
   Stream<CoreEvent> crateApiUmbraEvents() {
     final sink = RustStreamSink<CoreEvent>();
     unawaited(
@@ -254,7 +519,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 4,
+              funcId: 9,
               port: port_,
             );
           },
@@ -290,7 +555,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 10,
             port: port_,
           );
         },
@@ -311,6 +576,187 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<InviteOptions> crateApiTypesInviteOptionsDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_invite_options,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTypesInviteOptionsDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTypesInviteOptionsDefaultConstMeta =>
+      const TaskConstMeta(debugName: "invite_options_default", argNames: []);
+
+  @override
+  Future<List<JoinRequest>> crateApiUmbraJoinRequests({
+    required String serverId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 12,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_join_request,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraJoinRequestsConstMeta,
+        argValues: [serverId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraJoinRequestsConstMeta =>
+      const TaskConstMeta(debugName: "join_requests", argNames: ["serverId"]);
+
+  @override
+  Future<ServerInfo> crateApiUmbraJoinServer({
+    required String link,
+    String? displayName,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(link, serializer);
+          sse_encode_opt_String(displayName, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 13,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_server_info,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraJoinServerConstMeta,
+        argValues: [link, displayName],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraJoinServerConstMeta => const TaskConstMeta(
+    debugName: "join_server",
+    argNames: ["link", "displayName"],
+  );
+
+  @override
+  Future<void> crateApiUmbraKick({
+    required String serverId,
+    required String peerId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(peerId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraKickConstMeta,
+        argValues: [serverId, peerId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraKickConstMeta =>
+      const TaskConstMeta(debugName: "kick", argNames: ["serverId", "peerId"]);
+
+  @override
+  Future<void> crateApiUmbraLeaveServer({required String serverId}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraLeaveServerConstMeta,
+        argValues: [serverId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraLeaveServerConstMeta =>
+      const TaskConstMeta(debugName: "leave_server", argNames: ["serverId"]);
+
+  @override
+  Future<List<ServerChannel>> crateApiUmbraListChannels({
+    required String serverId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 16,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_server_channel,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraListChannelsConstMeta,
+        argValues: [serverId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraListChannelsConstMeta =>
+      const TaskConstMeta(debugName: "list_channels", argNames: ["serverId"]);
+
+  @override
   Future<List<Contact>> crateApiUmbraListContacts() {
     return handler.executeNormal(
       NormalTask(
@@ -319,7 +765,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 17,
             port: port_,
           );
         },
@@ -346,7 +792,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 18,
             port: port_,
           );
         },
@@ -365,6 +811,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "list_conversations", argNames: []);
 
   @override
+  Future<List<ServerMember>> crateApiUmbraListMembers({
+    required String serverId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_server_member,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraListMembersConstMeta,
+        argValues: [serverId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraListMembersConstMeta =>
+      const TaskConstMeta(debugName: "list_members", argNames: ["serverId"]);
+
+  @override
   Future<List<Message>> crateApiUmbraListMessages({
     required String peerId,
     PlatformInt64? before,
@@ -380,7 +856,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 20,
             port: port_,
           );
         },
@@ -401,6 +877,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<List<ServerInfo>> crateApiUmbraListServers() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_server_info,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraListServersConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraListServersConstMeta =>
+      const TaskConstMeta(debugName: "list_servers", argNames: []);
+
+  @override
   Future<void> crateApiUmbraMarkRead({
     required String peerId,
     required String upTo,
@@ -414,7 +917,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 22,
             port: port_,
           );
         },
@@ -441,7 +944,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 23,
             port: port_,
           );
         },
@@ -468,7 +971,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 24,
             port: port_,
           );
         },
@@ -487,6 +990,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "network_status", argNames: []);
 
   @override
+  Future<InvitePreview> crateApiUmbraParseInvite({required String link}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(link, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 25,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_invite_preview,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraParseInviteConstMeta,
+        argValues: [link],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraParseInviteConstMeta =>
+      const TaskConstMeta(debugName: "parse_invite", argNames: ["link"]);
+
+  @override
   Future<ContactCard> crateApiUmbraParseQr({required String payload}) {
     return handler.executeNormal(
       NormalTask(
@@ -496,7 +1027,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 26,
             port: port_,
           );
         },
@@ -524,7 +1055,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 27,
             port: port_,
           );
         },
@@ -552,7 +1083,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 28,
             port: port_,
           );
         },
@@ -571,6 +1102,70 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "remove_contact", argNames: ["peerId"]);
 
   @override
+  Future<void> crateApiUmbraRenameChannel({
+    required String serverId,
+    required String channelId,
+    required String name,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(channelId, serializer);
+          sse_encode_String(name, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 29,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraRenameChannelConstMeta,
+        argValues: [serverId, channelId, name],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraRenameChannelConstMeta => const TaskConstMeta(
+    debugName: "rename_channel",
+    argNames: ["serverId", "channelId", "name"],
+  );
+
+  @override
+  Future<void> crateApiUmbraRevokeInvite({required String inviteId}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(inviteId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 30,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraRevokeInviteConstMeta,
+        argValues: [inviteId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraRevokeInviteConstMeta =>
+      const TaskConstMeta(debugName: "revoke_invite", argNames: ["inviteId"]);
+
+  @override
   Future<SelfInfo> crateApiUmbraSelfInfo() {
     return handler.executeNormal(
       NormalTask(
@@ -579,7 +1174,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 31,
             port: port_,
           );
         },
@@ -615,7 +1210,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 32,
             port: port_,
           );
         },
@@ -649,7 +1244,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 33,
             port: port_,
           );
         },
@@ -668,6 +1263,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "send_text", argNames: ["peerId", "body"]);
 
   @override
+  Future<ServerInfo> crateApiUmbraServerInfo({required String serverId}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 34,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_server_info,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraServerInfoConstMeta,
+        argValues: [serverId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraServerInfoConstMeta =>
+      const TaskConstMeta(debugName: "server_info", argNames: ["serverId"]);
+
+  @override
   Future<void> crateApiUmbraSetDisplayName({required String name}) {
     return handler.executeNormal(
       NormalTask(
@@ -677,7 +1300,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 35,
             port: port_,
           );
         },
@@ -696,6 +1319,147 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "set_display_name", argNames: ["name"]);
 
   @override
+  Future<void> crateApiUmbraSetHistoryShared({
+    required String serverId,
+    required bool shared,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_bool(shared, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 36,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraSetHistorySharedConstMeta,
+        argValues: [serverId, shared],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraSetHistorySharedConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_history_shared",
+        argNames: ["serverId", "shared"],
+      );
+
+  @override
+  Future<void> crateApiUmbraSetInviteRoles({
+    required String serverId,
+    required List<ServerRole> roles,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_list_server_role(roles, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 37,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraSetInviteRolesConstMeta,
+        argValues: [serverId, roles],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraSetInviteRolesConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_invite_roles",
+        argNames: ["serverId", "roles"],
+      );
+
+  @override
+  Future<void> crateApiUmbraSetRole({
+    required String serverId,
+    required String peerId,
+    required ServerRole role,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(peerId, serializer);
+          sse_encode_server_role(role, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 38,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraSetRoleConstMeta,
+        argValues: [serverId, peerId, role],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraSetRoleConstMeta => const TaskConstMeta(
+    debugName: "set_role",
+    argNames: ["serverId", "peerId", "role"],
+  );
+
+  @override
+  Future<void> crateApiUmbraSetServerDisplayName({
+    required String serverId,
+    String? displayName,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_opt_String(displayName, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 39,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraSetServerDisplayNameConstMeta,
+        argValues: [serverId, displayName],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraSetServerDisplayNameConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_server_display_name",
+        argNames: ["serverId", "displayName"],
+      );
+
+  @override
   Future<void> crateApiUmbraSetVerified({
     required String peerId,
     required bool verified,
@@ -709,7 +1473,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 40,
             port: port_,
           );
         },
@@ -738,7 +1502,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 41,
             port: port_,
           );
         },
@@ -765,7 +1529,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 42,
             port: port_,
           );
         },
@@ -782,6 +1546,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiUmbraStopNetworkConstMeta =>
       const TaskConstMeta(debugName: "stop_network", argNames: []);
+
+  @override
+  Future<void> crateApiUmbraUnban({
+    required String serverId,
+    required String peerId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(serverId, serializer);
+          sse_encode_String(peerId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 43,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiUmbraUnbanConstMeta,
+        argValues: [serverId, peerId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUmbraUnbanConstMeta =>
+      const TaskConstMeta(debugName: "unban", argNames: ["serverId", "peerId"]);
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw) {
@@ -826,6 +1622,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  InviteOptions dco_decode_box_autoadd_invite_options(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_invite_options(raw);
+  }
+
+  @protected
+  JoinRequest dco_decode_box_autoadd_join_request(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_join_request(raw);
+  }
+
+  @protected
+  MemberLeftReason dco_decode_box_autoadd_member_left_reason(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_member_left_reason(raw);
+  }
+
+  @protected
   Message dco_decode_box_autoadd_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_message(raw);
@@ -835,6 +1649,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   NetworkInfo dco_decode_box_autoadd_network_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_network_info(raw);
+  }
+
+  @protected
+  ServerEvent dco_decode_box_autoadd_server_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_server_event(raw);
+  }
+
+  @protected
+  ServerRole dco_decode_box_autoadd_server_role(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_server_role(raw);
+  }
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
+  BigInt dco_decode_box_autoadd_u_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_u_64(raw);
   }
 
   @protected
@@ -948,9 +1786,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           newSafetyNumber: dco_decode_String(raw[5]),
           source: dco_decode_key_change_source(raw[6]),
         );
+      case 8:
+        return CoreEvent_Server(
+          serverId: dco_decode_String(raw[1]),
+          event: dco_decode_box_autoadd_server_event(raw[2]),
+        );
       default:
         throw Exception("unreachable");
     }
+  }
+
+  @protected
+  CreatedInvite dco_decode_created_invite(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return CreatedInvite(
+      inviteId: dco_decode_String(arr[0]),
+      link: dco_decode_String(arr[1]),
+      expiresAtMs: dco_decode_i_64(arr[2]),
+      maxUses: dco_decode_u_32(arr[3]),
+    );
+  }
+
+  @protected
+  CreatedServer dco_decode_created_server(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return CreatedServer(
+      server: dco_decode_server_info(arr[0]),
+      recoverySecret: dco_decode_opt_String(arr[1]),
+    );
   }
 
   @protected
@@ -969,6 +1838,53 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 dco_decode_i_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dcoDecodeI64(raw);
+  }
+
+  @protected
+  InviteOptions dco_decode_invite_options(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return InviteOptions(
+      ttlSecs: dco_decode_opt_box_autoadd_u_64(arr[0]),
+      maxUses: dco_decode_opt_box_autoadd_u_32(arr[1]),
+      needsApproval: dco_decode_bool(arr[2]),
+    );
+  }
+
+  @protected
+  InvitePreview dco_decode_invite_preview(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    return InvitePreview(
+      serverId: dco_decode_String(arr[0]),
+      serverName: dco_decode_String(arr[1]),
+      ownerFingerprint: dco_decode_String(arr[2]),
+      inviter: dco_decode_contact_card(arr[3]),
+      inviteId: dco_decode_String(arr[4]),
+      expiresAtMs: dco_decode_i_64(arr[5]),
+      needsApproval: dco_decode_bool(arr[6]),
+      hosts: dco_decode_list_String(arr[7]),
+      expired: dco_decode_bool(arr[8]),
+      alreadyMember: dco_decode_bool(arr[9]),
+    );
+  }
+
+  @protected
+  JoinRequest dco_decode_join_request(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return JoinRequest(
+      serverId: dco_decode_String(arr[0]),
+      card: dco_decode_contact_card(arr[1]),
+      inviteId: dco_decode_String(arr[2]),
+      requestedAtMs: dco_decode_i_64(arr[3]),
+    );
   }
 
   @protected
@@ -996,6 +1912,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<JoinRequest> dco_decode_list_join_request(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_join_request).toList();
+  }
+
+  @protected
   List<Message> dco_decode_list_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_message).toList();
@@ -1011,6 +1933,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  List<ServerChannel> dco_decode_list_server_channel(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_server_channel).toList();
+  }
+
+  @protected
+  List<ServerInfo> dco_decode_list_server_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_server_info).toList();
+  }
+
+  @protected
+  List<ServerMember> dco_decode_list_server_member(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_server_member).toList();
+  }
+
+  @protected
+  List<ServerRole> dco_decode_list_server_role(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_server_role).toList();
+  }
+
+  @protected
+  MemberLeftReason dco_decode_member_left_reason(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return MemberLeftReason.values[raw as int];
   }
 
   @protected
@@ -1057,9 +2009,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MemberLeftReason? dco_decode_opt_box_autoadd_member_left_reason(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_member_left_reason(raw);
+  }
+
+  @protected
   Message? dco_decode_opt_box_autoadd_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_message(raw);
+  }
+
+  @protected
+  ServerRole? dco_decode_opt_box_autoadd_server_role(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_server_role(raw);
+  }
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
+  }
+
+  @protected
+  BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_u_64(raw);
   }
 
   @protected
@@ -1080,6 +2056,109 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ServerChannel dco_decode_server_channel(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return ServerChannel(
+      id: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      canRead: dco_decode_bool(arr[2]),
+      canPost: dco_decode_bool(arr[3]),
+      readRoles: dco_decode_list_server_role(arr[4]),
+      postRoles: dco_decode_list_server_role(arr[5]),
+    );
+  }
+
+  @protected
+  ServerEvent dco_decode_server_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    switch (raw[0]) {
+      case 0:
+        return ServerEvent_Joined();
+      case 1:
+        return ServerEvent_Updated(seq: dco_decode_u_64(raw[1]));
+      case 2:
+        return ServerEvent_MemberJoined(peerId: dco_decode_String(raw[1]));
+      case 3:
+        return ServerEvent_MemberLeft(
+          peerId: dco_decode_String(raw[1]),
+          reason: dco_decode_member_left_reason(raw[2]),
+        );
+      case 4:
+        return ServerEvent_JoinRequest(
+          request: dco_decode_box_autoadd_join_request(raw[1]),
+        );
+      case 5:
+        return ServerEvent_ManifestRollback(
+          have: dco_decode_u_64(raw[1]),
+          got: dco_decode_u_64(raw[2]),
+        );
+      case 6:
+        return ServerEvent_Forked(seq: dco_decode_u_64(raw[1]));
+      case 7:
+        return ServerEvent_Removed(
+          reason: dco_decode_member_left_reason(raw[1]),
+        );
+      default:
+        throw Exception("unreachable");
+    }
+  }
+
+  @protected
+  ServerInfo dco_decode_server_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
+    return ServerInfo(
+      serverId: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      ownerFingerprint: dco_decode_String(arr[2]),
+      myRole: dco_decode_opt_box_autoadd_server_role(arr[3]),
+      status: dco_decode_server_status(arr[4]),
+      removedReason: dco_decode_opt_box_autoadd_member_left_reason(arr[5]),
+      seq: dco_decode_u_64(arr[6]),
+      memberCount: dco_decode_u_32(arr[7]),
+      channelCount: dco_decode_u_32(arr[8]),
+      inviteRoles: dco_decode_list_server_role(arr[9]),
+      historyShared: dco_decode_bool(arr[10]),
+      retentionDays: dco_decode_u_32(arr[11]),
+      isOwnerDevice: dco_decode_bool(arr[12]),
+      myDisplayName: dco_decode_opt_String(arr[13]),
+    );
+  }
+
+  @protected
+  ServerMember dco_decode_server_member(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return ServerMember(
+      peerId: dco_decode_String(arr[0]),
+      displayName: dco_decode_String(arr[1]),
+      role: dco_decode_server_role(arr[2]),
+      addedBy: dco_decode_String(arr[3]),
+      isSelf: dco_decode_bool(arr[4]),
+      isContact: dco_decode_bool(arr[5]),
+    );
+  }
+
+  @protected
+  ServerRole dco_decode_server_role(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ServerRole.values[raw as int];
+  }
+
+  @protected
+  ServerStatus dco_decode_server_status(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ServerStatus.values[raw as int];
+  }
+
+  @protected
   SignalKind dco_decode_signal_kind(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return SignalKind.values[raw as int];
@@ -1089,6 +2168,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int dco_decode_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
+  }
+
+  @protected
+  BigInt dco_decode_u_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeU64(raw);
   }
 
   @protected
@@ -1152,6 +2237,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  InviteOptions sse_decode_box_autoadd_invite_options(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_invite_options(deserializer));
+  }
+
+  @protected
+  JoinRequest sse_decode_box_autoadd_join_request(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_join_request(deserializer));
+  }
+
+  @protected
+  MemberLeftReason sse_decode_box_autoadd_member_left_reason(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_member_left_reason(deserializer));
+  }
+
+  @protected
   Message sse_decode_box_autoadd_message(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_message(deserializer));
@@ -1163,6 +2272,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_network_info(deserializer));
+  }
+
+  @protected
+  ServerEvent sse_decode_box_autoadd_server_event(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_server_event(deserializer));
+  }
+
+  @protected
+  ServerRole sse_decode_box_autoadd_server_role(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_server_role(deserializer));
+  }
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_u_32(deserializer));
+  }
+
+  @protected
+  BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_u_64(deserializer));
   }
 
   @protected
@@ -1309,9 +2444,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           newSafetyNumber: var_newSafetyNumber,
           source: var_source,
         );
+      case 8:
+        var var_serverId = sse_decode_String(deserializer);
+        var var_event = sse_decode_box_autoadd_server_event(deserializer);
+        return CoreEvent_Server(serverId: var_serverId, event: var_event);
       default:
         throw UnimplementedError('');
     }
+  }
+
+  @protected
+  CreatedInvite sse_decode_created_invite(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_inviteId = sse_decode_String(deserializer);
+    var var_link = sse_decode_String(deserializer);
+    var var_expiresAtMs = sse_decode_i_64(deserializer);
+    var var_maxUses = sse_decode_u_32(deserializer);
+    return CreatedInvite(
+      inviteId: var_inviteId,
+      link: var_link,
+      expiresAtMs: var_expiresAtMs,
+      maxUses: var_maxUses,
+    );
+  }
+
+  @protected
+  CreatedServer sse_decode_created_server(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_server = sse_decode_server_info(deserializer);
+    var var_recoverySecret = sse_decode_opt_String(deserializer);
+    return CreatedServer(
+      server: var_server,
+      recoverySecret: var_recoverySecret,
+    );
   }
 
   @protected
@@ -1331,6 +2496,61 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getPlatformInt64();
+  }
+
+  @protected
+  InviteOptions sse_decode_invite_options(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_ttlSecs = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_maxUses = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_needsApproval = sse_decode_bool(deserializer);
+    return InviteOptions(
+      ttlSecs: var_ttlSecs,
+      maxUses: var_maxUses,
+      needsApproval: var_needsApproval,
+    );
+  }
+
+  @protected
+  InvitePreview sse_decode_invite_preview(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_serverId = sse_decode_String(deserializer);
+    var var_serverName = sse_decode_String(deserializer);
+    var var_ownerFingerprint = sse_decode_String(deserializer);
+    var var_inviter = sse_decode_contact_card(deserializer);
+    var var_inviteId = sse_decode_String(deserializer);
+    var var_expiresAtMs = sse_decode_i_64(deserializer);
+    var var_needsApproval = sse_decode_bool(deserializer);
+    var var_hosts = sse_decode_list_String(deserializer);
+    var var_expired = sse_decode_bool(deserializer);
+    var var_alreadyMember = sse_decode_bool(deserializer);
+    return InvitePreview(
+      serverId: var_serverId,
+      serverName: var_serverName,
+      ownerFingerprint: var_ownerFingerprint,
+      inviter: var_inviter,
+      inviteId: var_inviteId,
+      expiresAtMs: var_expiresAtMs,
+      needsApproval: var_needsApproval,
+      hosts: var_hosts,
+      expired: var_expired,
+      alreadyMember: var_alreadyMember,
+    );
+  }
+
+  @protected
+  JoinRequest sse_decode_join_request(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_serverId = sse_decode_String(deserializer);
+    var var_card = sse_decode_contact_card(deserializer);
+    var var_inviteId = sse_decode_String(deserializer);
+    var var_requestedAtMs = sse_decode_i_64(deserializer);
+    return JoinRequest(
+      serverId: var_serverId,
+      card: var_card,
+      inviteId: var_inviteId,
+      requestedAtMs: var_requestedAtMs,
+    );
   }
 
   @protected
@@ -1379,6 +2599,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<JoinRequest> sse_decode_list_join_request(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <JoinRequest>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_join_request(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<Message> sse_decode_list_message(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1402,6 +2634,65 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  List<ServerChannel> sse_decode_list_server_channel(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ServerChannel>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_server_channel(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ServerInfo> sse_decode_list_server_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ServerInfo>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_server_info(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ServerMember> sse_decode_list_server_member(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ServerMember>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_server_member(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ServerRole> sse_decode_list_server_role(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ServerRole>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_server_role(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  MemberLeftReason sse_decode_member_left_reason(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return MemberLeftReason.values[inner];
   }
 
   @protected
@@ -1463,11 +2754,59 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  MemberLeftReason? sse_decode_opt_box_autoadd_member_left_reason(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_member_left_reason(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   Message? sse_decode_opt_box_autoadd_message(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_message(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  ServerRole? sse_decode_opt_box_autoadd_server_role(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_server_role(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_u_32(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_u_64(deserializer));
     } else {
       return null;
     }
@@ -1495,6 +2834,131 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ServerChannel sse_decode_server_channel(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_canRead = sse_decode_bool(deserializer);
+    var var_canPost = sse_decode_bool(deserializer);
+    var var_readRoles = sse_decode_list_server_role(deserializer);
+    var var_postRoles = sse_decode_list_server_role(deserializer);
+    return ServerChannel(
+      id: var_id,
+      name: var_name,
+      canRead: var_canRead,
+      canPost: var_canPost,
+      readRoles: var_readRoles,
+      postRoles: var_postRoles,
+    );
+  }
+
+  @protected
+  ServerEvent sse_decode_server_event(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var tag_ = sse_decode_i_32(deserializer);
+    switch (tag_) {
+      case 0:
+        return ServerEvent_Joined();
+      case 1:
+        var var_seq = sse_decode_u_64(deserializer);
+        return ServerEvent_Updated(seq: var_seq);
+      case 2:
+        var var_peerId = sse_decode_String(deserializer);
+        return ServerEvent_MemberJoined(peerId: var_peerId);
+      case 3:
+        var var_peerId = sse_decode_String(deserializer);
+        var var_reason = sse_decode_member_left_reason(deserializer);
+        return ServerEvent_MemberLeft(peerId: var_peerId, reason: var_reason);
+      case 4:
+        var var_request = sse_decode_box_autoadd_join_request(deserializer);
+        return ServerEvent_JoinRequest(request: var_request);
+      case 5:
+        var var_have = sse_decode_u_64(deserializer);
+        var var_got = sse_decode_u_64(deserializer);
+        return ServerEvent_ManifestRollback(have: var_have, got: var_got);
+      case 6:
+        var var_seq = sse_decode_u_64(deserializer);
+        return ServerEvent_Forked(seq: var_seq);
+      case 7:
+        var var_reason = sse_decode_member_left_reason(deserializer);
+        return ServerEvent_Removed(reason: var_reason);
+      default:
+        throw UnimplementedError('');
+    }
+  }
+
+  @protected
+  ServerInfo sse_decode_server_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_serverId = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_ownerFingerprint = sse_decode_String(deserializer);
+    var var_myRole = sse_decode_opt_box_autoadd_server_role(deserializer);
+    var var_status = sse_decode_server_status(deserializer);
+    var var_removedReason = sse_decode_opt_box_autoadd_member_left_reason(
+      deserializer,
+    );
+    var var_seq = sse_decode_u_64(deserializer);
+    var var_memberCount = sse_decode_u_32(deserializer);
+    var var_channelCount = sse_decode_u_32(deserializer);
+    var var_inviteRoles = sse_decode_list_server_role(deserializer);
+    var var_historyShared = sse_decode_bool(deserializer);
+    var var_retentionDays = sse_decode_u_32(deserializer);
+    var var_isOwnerDevice = sse_decode_bool(deserializer);
+    var var_myDisplayName = sse_decode_opt_String(deserializer);
+    return ServerInfo(
+      serverId: var_serverId,
+      name: var_name,
+      ownerFingerprint: var_ownerFingerprint,
+      myRole: var_myRole,
+      status: var_status,
+      removedReason: var_removedReason,
+      seq: var_seq,
+      memberCount: var_memberCount,
+      channelCount: var_channelCount,
+      inviteRoles: var_inviteRoles,
+      historyShared: var_historyShared,
+      retentionDays: var_retentionDays,
+      isOwnerDevice: var_isOwnerDevice,
+      myDisplayName: var_myDisplayName,
+    );
+  }
+
+  @protected
+  ServerMember sse_decode_server_member(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_peerId = sse_decode_String(deserializer);
+    var var_displayName = sse_decode_String(deserializer);
+    var var_role = sse_decode_server_role(deserializer);
+    var var_addedBy = sse_decode_String(deserializer);
+    var var_isSelf = sse_decode_bool(deserializer);
+    var var_isContact = sse_decode_bool(deserializer);
+    return ServerMember(
+      peerId: var_peerId,
+      displayName: var_displayName,
+      role: var_role,
+      addedBy: var_addedBy,
+      isSelf: var_isSelf,
+      isContact: var_isContact,
+    );
+  }
+
+  @protected
+  ServerRole sse_decode_server_role(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ServerRole.values[inner];
+  }
+
+  @protected
+  ServerStatus sse_decode_server_status(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ServerStatus.values[inner];
+  }
+
+  @protected
   SignalKind sse_decode_signal_kind(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
@@ -1505,6 +2969,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int sse_decode_u_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint32();
+  }
+
+  @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getBigUint64();
   }
 
   @protected
@@ -1584,6 +3054,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_invite_options(
+    InviteOptions self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_invite_options(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_join_request(
+    JoinRequest self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_join_request(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_member_left_reason(
+    MemberLeftReason self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_member_left_reason(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_message(Message self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_message(self, serializer);
@@ -1596,6 +3093,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_network_info(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_server_event(
+    ServerEvent self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_server_event(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_server_role(
+    ServerRole self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_server_role(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_64(self, serializer);
   }
 
   @protected
@@ -1704,7 +3231,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_String(oldSafetyNumber, serializer);
         sse_encode_String(newSafetyNumber, serializer);
         sse_encode_key_change_source(source, serializer);
+      case CoreEvent_Server(serverId: final serverId, event: final event):
+        sse_encode_i_32(8, serializer);
+        sse_encode_String(serverId, serializer);
+        sse_encode_box_autoadd_server_event(event, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_created_invite(CreatedInvite self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.inviteId, serializer);
+    sse_encode_String(self.link, serializer);
+    sse_encode_i_64(self.expiresAtMs, serializer);
+    sse_encode_u_32(self.maxUses, serializer);
+  }
+
+  @protected
+  void sse_encode_created_server(CreatedServer self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_server_info(self.server, serializer);
+    sse_encode_opt_String(self.recoverySecret, serializer);
   }
 
   @protected
@@ -1726,6 +3273,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
+  void sse_encode_invite_options(InviteOptions self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_box_autoadd_u_64(self.ttlSecs, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.maxUses, serializer);
+    sse_encode_bool(self.needsApproval, serializer);
+  }
+
+  @protected
+  void sse_encode_invite_preview(InvitePreview self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.serverId, serializer);
+    sse_encode_String(self.serverName, serializer);
+    sse_encode_String(self.ownerFingerprint, serializer);
+    sse_encode_contact_card(self.inviter, serializer);
+    sse_encode_String(self.inviteId, serializer);
+    sse_encode_i_64(self.expiresAtMs, serializer);
+    sse_encode_bool(self.needsApproval, serializer);
+    sse_encode_list_String(self.hosts, serializer);
+    sse_encode_bool(self.expired, serializer);
+    sse_encode_bool(self.alreadyMember, serializer);
+  }
+
+  @protected
+  void sse_encode_join_request(JoinRequest self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.serverId, serializer);
+    sse_encode_contact_card(self.card, serializer);
+    sse_encode_String(self.inviteId, serializer);
+    sse_encode_i_64(self.requestedAtMs, serializer);
   }
 
   @protected
@@ -1768,6 +3347,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_join_request(
+    List<JoinRequest> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_join_request(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_message(List<Message> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
@@ -1796,6 +3387,63 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_list_server_channel(
+    List<ServerChannel> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_server_channel(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_server_info(
+    List<ServerInfo> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_server_info(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_server_member(
+    List<ServerMember> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_server_member(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_server_role(
+    List<ServerRole> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_server_role(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_member_left_reason(
+    MemberLeftReason self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -1843,6 +3491,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_member_left_reason(
+    MemberLeftReason? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_member_left_reason(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_message(
     Message? self,
     SseSerializer serializer,
@@ -1852,6 +3513,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_message(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_server_role(
+    ServerRole? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_server_role(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_u_32(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_u_64(self, serializer);
     }
   }
 
@@ -1868,6 +3562,94 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_server_channel(ServerChannel self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_bool(self.canRead, serializer);
+    sse_encode_bool(self.canPost, serializer);
+    sse_encode_list_server_role(self.readRoles, serializer);
+    sse_encode_list_server_role(self.postRoles, serializer);
+  }
+
+  @protected
+  void sse_encode_server_event(ServerEvent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    switch (self) {
+      case ServerEvent_Joined():
+        sse_encode_i_32(0, serializer);
+      case ServerEvent_Updated(seq: final seq):
+        sse_encode_i_32(1, serializer);
+        sse_encode_u_64(seq, serializer);
+      case ServerEvent_MemberJoined(peerId: final peerId):
+        sse_encode_i_32(2, serializer);
+        sse_encode_String(peerId, serializer);
+      case ServerEvent_MemberLeft(peerId: final peerId, reason: final reason):
+        sse_encode_i_32(3, serializer);
+        sse_encode_String(peerId, serializer);
+        sse_encode_member_left_reason(reason, serializer);
+      case ServerEvent_JoinRequest(request: final request):
+        sse_encode_i_32(4, serializer);
+        sse_encode_box_autoadd_join_request(request, serializer);
+      case ServerEvent_ManifestRollback(have: final have, got: final got):
+        sse_encode_i_32(5, serializer);
+        sse_encode_u_64(have, serializer);
+        sse_encode_u_64(got, serializer);
+      case ServerEvent_Forked(seq: final seq):
+        sse_encode_i_32(6, serializer);
+        sse_encode_u_64(seq, serializer);
+      case ServerEvent_Removed(reason: final reason):
+        sse_encode_i_32(7, serializer);
+        sse_encode_member_left_reason(reason, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_server_info(ServerInfo self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.serverId, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.ownerFingerprint, serializer);
+    sse_encode_opt_box_autoadd_server_role(self.myRole, serializer);
+    sse_encode_server_status(self.status, serializer);
+    sse_encode_opt_box_autoadd_member_left_reason(
+      self.removedReason,
+      serializer,
+    );
+    sse_encode_u_64(self.seq, serializer);
+    sse_encode_u_32(self.memberCount, serializer);
+    sse_encode_u_32(self.channelCount, serializer);
+    sse_encode_list_server_role(self.inviteRoles, serializer);
+    sse_encode_bool(self.historyShared, serializer);
+    sse_encode_u_32(self.retentionDays, serializer);
+    sse_encode_bool(self.isOwnerDevice, serializer);
+    sse_encode_opt_String(self.myDisplayName, serializer);
+  }
+
+  @protected
+  void sse_encode_server_member(ServerMember self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.peerId, serializer);
+    sse_encode_String(self.displayName, serializer);
+    sse_encode_server_role(self.role, serializer);
+    sse_encode_String(self.addedBy, serializer);
+    sse_encode_bool(self.isSelf, serializer);
+    sse_encode_bool(self.isContact, serializer);
+  }
+
+  @protected
+  void sse_encode_server_role(ServerRole self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_server_status(ServerStatus self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_signal_kind(SignalKind self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
@@ -1877,6 +3659,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_u_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint32(self);
+  }
+
+  @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putBigUint64(self);
   }
 
   @protected

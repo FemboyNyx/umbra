@@ -41,10 +41,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
+  InviteOptions dco_decode_box_autoadd_invite_options(dynamic raw);
+
+  @protected
+  JoinRequest dco_decode_box_autoadd_join_request(dynamic raw);
+
+  @protected
+  MemberLeftReason dco_decode_box_autoadd_member_left_reason(dynamic raw);
+
+  @protected
   Message dco_decode_box_autoadd_message(dynamic raw);
 
   @protected
   NetworkInfo dco_decode_box_autoadd_network_info(dynamic raw);
+
+  @protected
+  ServerEvent dco_decode_box_autoadd_server_event(dynamic raw);
+
+  @protected
+  ServerRole dco_decode_box_autoadd_server_role(dynamic raw);
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  BigInt dco_decode_box_autoadd_u_64(dynamic raw);
 
   @protected
   Contact dco_decode_contact(dynamic raw);
@@ -62,6 +83,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CoreEvent dco_decode_core_event(dynamic raw);
 
   @protected
+  CreatedInvite dco_decode_created_invite(dynamic raw);
+
+  @protected
+  CreatedServer dco_decode_created_server(dynamic raw);
+
+  @protected
   DeliveryStatus dco_decode_delivery_status(dynamic raw);
 
   @protected
@@ -69,6 +96,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64 dco_decode_i_64(dynamic raw);
+
+  @protected
+  InviteOptions dco_decode_invite_options(dynamic raw);
+
+  @protected
+  InvitePreview dco_decode_invite_preview(dynamic raw);
+
+  @protected
+  JoinRequest dco_decode_join_request(dynamic raw);
 
   @protected
   KeyChangeSource dco_decode_key_change_source(dynamic raw);
@@ -83,6 +119,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ConversationSummary> dco_decode_list_conversation_summary(dynamic raw);
 
   @protected
+  List<JoinRequest> dco_decode_list_join_request(dynamic raw);
+
+  @protected
   List<Message> dco_decode_list_message(dynamic raw);
 
   @protected
@@ -90,6 +129,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<ServerChannel> dco_decode_list_server_channel(dynamic raw);
+
+  @protected
+  List<ServerInfo> dco_decode_list_server_info(dynamic raw);
+
+  @protected
+  List<ServerMember> dco_decode_list_server_member(dynamic raw);
+
+  @protected
+  List<ServerRole> dco_decode_list_server_role(dynamic raw);
+
+  @protected
+  MemberLeftReason dco_decode_member_left_reason(dynamic raw);
 
   @protected
   Message dco_decode_message(dynamic raw);
@@ -104,16 +158,49 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
 
   @protected
+  MemberLeftReason? dco_decode_opt_box_autoadd_member_left_reason(dynamic raw);
+
+  @protected
   Message? dco_decode_opt_box_autoadd_message(dynamic raw);
 
   @protected
+  ServerRole? dco_decode_opt_box_autoadd_server_role(dynamic raw);
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
+
+  @protected
   SelfInfo dco_decode_self_info(dynamic raw);
+
+  @protected
+  ServerChannel dco_decode_server_channel(dynamic raw);
+
+  @protected
+  ServerEvent dco_decode_server_event(dynamic raw);
+
+  @protected
+  ServerInfo dco_decode_server_info(dynamic raw);
+
+  @protected
+  ServerMember dco_decode_server_member(dynamic raw);
+
+  @protected
+  ServerRole dco_decode_server_role(dynamic raw);
+
+  @protected
+  ServerStatus dco_decode_server_status(dynamic raw);
 
   @protected
   SignalKind dco_decode_signal_kind(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
+
+  @protected
+  BigInt dco_decode_u_64(dynamic raw);
 
   @protected
   int dco_decode_u_8(dynamic raw);
@@ -145,10 +232,35 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
+  InviteOptions sse_decode_box_autoadd_invite_options(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  JoinRequest sse_decode_box_autoadd_join_request(SseDeserializer deserializer);
+
+  @protected
+  MemberLeftReason sse_decode_box_autoadd_member_left_reason(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Message sse_decode_box_autoadd_message(SseDeserializer deserializer);
 
   @protected
   NetworkInfo sse_decode_box_autoadd_network_info(SseDeserializer deserializer);
+
+  @protected
+  ServerEvent sse_decode_box_autoadd_server_event(SseDeserializer deserializer);
+
+  @protected
+  ServerRole sse_decode_box_autoadd_server_role(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
   Contact sse_decode_contact(SseDeserializer deserializer);
@@ -168,6 +280,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CoreEvent sse_decode_core_event(SseDeserializer deserializer);
 
   @protected
+  CreatedInvite sse_decode_created_invite(SseDeserializer deserializer);
+
+  @protected
+  CreatedServer sse_decode_created_server(SseDeserializer deserializer);
+
+  @protected
   DeliveryStatus sse_decode_delivery_status(SseDeserializer deserializer);
 
   @protected
@@ -175,6 +293,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
+
+  @protected
+  InviteOptions sse_decode_invite_options(SseDeserializer deserializer);
+
+  @protected
+  InvitePreview sse_decode_invite_preview(SseDeserializer deserializer);
+
+  @protected
+  JoinRequest sse_decode_join_request(SseDeserializer deserializer);
 
   @protected
   KeyChangeSource sse_decode_key_change_source(SseDeserializer deserializer);
@@ -191,6 +318,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<JoinRequest> sse_decode_list_join_request(SseDeserializer deserializer);
+
+  @protected
   List<Message> sse_decode_list_message(SseDeserializer deserializer);
 
   @protected
@@ -198,6 +328,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<ServerChannel> sse_decode_list_server_channel(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ServerInfo> sse_decode_list_server_info(SseDeserializer deserializer);
+
+  @protected
+  List<ServerMember> sse_decode_list_server_member(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ServerRole> sse_decode_list_server_role(SseDeserializer deserializer);
+
+  @protected
+  MemberLeftReason sse_decode_member_left_reason(SseDeserializer deserializer);
 
   @protected
   Message sse_decode_message(SseDeserializer deserializer);
@@ -212,16 +361,53 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
+  MemberLeftReason? sse_decode_opt_box_autoadd_member_left_reason(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Message? sse_decode_opt_box_autoadd_message(SseDeserializer deserializer);
 
   @protected
+  ServerRole? sse_decode_opt_box_autoadd_server_role(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
+
+  @protected
   SelfInfo sse_decode_self_info(SseDeserializer deserializer);
+
+  @protected
+  ServerChannel sse_decode_server_channel(SseDeserializer deserializer);
+
+  @protected
+  ServerEvent sse_decode_server_event(SseDeserializer deserializer);
+
+  @protected
+  ServerInfo sse_decode_server_info(SseDeserializer deserializer);
+
+  @protected
+  ServerMember sse_decode_server_member(SseDeserializer deserializer);
+
+  @protected
+  ServerRole sse_decode_server_role(SseDeserializer deserializer);
+
+  @protected
+  ServerStatus sse_decode_server_status(SseDeserializer deserializer);
 
   @protected
   SignalKind sse_decode_signal_kind(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
+
+  @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_8(SseDeserializer deserializer);
@@ -266,6 +452,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_invite_options(
+    InviteOptions self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_join_request(
+    JoinRequest self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_member_left_reason(
+    MemberLeftReason self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_message(Message self, SseSerializer serializer);
 
   @protected
@@ -273,6 +477,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     NetworkInfo self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_server_event(
+    ServerEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_server_role(
+    ServerRole self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
 
   @protected
   void sse_encode_contact(Contact self, SseSerializer serializer);
@@ -293,6 +515,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_core_event(CoreEvent self, SseSerializer serializer);
 
   @protected
+  void sse_encode_created_invite(CreatedInvite self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_created_server(CreatedServer self, SseSerializer serializer);
+
+  @protected
   void sse_encode_delivery_status(
     DeliveryStatus self,
     SseSerializer serializer,
@@ -303,6 +531,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_invite_options(InviteOptions self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_invite_preview(InvitePreview self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_join_request(JoinRequest self, SseSerializer serializer);
 
   @protected
   void sse_encode_key_change_source(
@@ -323,6 +560,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_join_request(
+    List<JoinRequest> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_message(List<Message> self, SseSerializer serializer);
 
   @protected
@@ -331,6 +574,36 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_server_channel(
+    List<ServerChannel> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_server_info(
+    List<ServerInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_server_member(
+    List<ServerMember> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_server_role(
+    List<ServerRole> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_member_left_reason(
+    MemberLeftReason self,
     SseSerializer serializer,
   );
 
@@ -350,19 +623,58 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_member_left_reason(
+    MemberLeftReason? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_message(
     Message? self,
     SseSerializer serializer,
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_server_role(
+    ServerRole? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_self_info(SelfInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_channel(ServerChannel self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_event(ServerEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_info(ServerInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_member(ServerMember self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_role(ServerRole self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_status(ServerStatus self, SseSerializer serializer);
 
   @protected
   void sse_encode_signal_kind(SignalKind self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_8(int self, SseSerializer serializer);

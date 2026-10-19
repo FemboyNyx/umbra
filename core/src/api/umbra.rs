@@ -252,6 +252,134 @@ pub async fn send_signal(
     }
 }
 
+// ---- servers (docs/core-api.md#servers) ----
+
+/// Run a server call on the real core's runtime. The mock backend has no
+/// servers yet.
+async fn server_call<T: Send + 'static>(
+    f: impl FnOnce(Arc<Core>) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    match backend()? {
+        Backend::Mock(_) => bail!("servers are not available in mock mode yet"),
+        Backend::Real(c) => on_runtime(async move { f(c) }).await,
+    }
+}
+
+/// Create a server we own, with a `general` text channel. `recovery_keys`:
+/// 1 to 3 Ed25519 public keys (base64); empty = generate one and return its
+/// secret once in `CreatedServer.recovery_secret` (core never stores it).
+/// `display_name`: our name in this server (`None` = the global one).
+pub async fn create_server(
+    name: String,
+    recovery_keys: Vec<String>,
+    display_name: Option<String>,
+) -> Result<CreatedServer> {
+    server_call(move |c| c.create_server(&name, recovery_keys, display_name)).await
+}
+
+pub async fn list_servers() -> Result<Vec<ServerInfo>> {
+    server_call(|c| c.list_servers()).await
+}
+
+pub async fn server_info(server_id: String) -> Result<ServerInfo> {
+    server_call(move |c| c.server_info(&server_id)).await
+}
+
+/// Leave and delete everything kept about the server.
+pub async fn leave_server(server_id: String) -> Result<()> {
+    server_call(move |c| c.leave_server(&server_id)).await
+}
+
+pub async fn list_channels(server_id: String) -> Result<Vec<ServerChannel>> {
+    server_call(move |c| c.list_channels(&server_id)).await
+}
+
+/// Owner and admins.
+pub async fn create_channel(server_id: String, name: String) -> Result<ServerChannel> {
+    server_call(move |c| c.create_channel(&server_id, &name)).await
+}
+
+/// Owner and admins.
+pub async fn rename_channel(server_id: String, channel_id: String, name: String) -> Result<()> {
+    server_call(move |c| c.rename_channel(&server_id, &channel_id, &name)).await
+}
+
+pub async fn list_members(server_id: String) -> Result<Vec<ServerMember>> {
+    server_call(move |c| c.list_members(&server_id)).await
+}
+
+/// Owner only: `Admin` or `Member` (no ownership transfer yet).
+pub async fn set_role(server_id: String, peer_id: String, role: ServerRole) -> Result<()> {
+    server_call(move |c| c.set_role(&server_id, &peer_id, role)).await
+}
+
+/// Owner only: roles that may create invites (the owner always may).
+pub async fn set_invite_roles(server_id: String, roles: Vec<ServerRole>) -> Result<()> {
+    server_call(move |c| c.set_invite_roles(&server_id, roles)).await
+}
+
+/// Owner only: whether new members see history from before they joined.
+/// Default `true`.
+pub async fn set_history_shared(server_id: String, shared: bool) -> Result<()> {
+    server_call(move |c| c.set_history_shared(&server_id, shared)).await
+}
+
+/// Our display name in this server (`None` = the global one).
+pub async fn set_server_display_name(
+    server_id: String,
+    display_name: Option<String>,
+) -> Result<()> {
+    server_call(move |c| c.set_server_display_name(&server_id, display_name)).await
+}
+
+/// Owner, or admins on members.
+pub async fn kick(server_id: String, peer_id: String) -> Result<()> {
+    server_call(move |c| c.kick(&server_id, &peer_id)).await
+}
+
+/// Owner, or admins on members.
+pub async fn ban(server_id: String, peer_id: String) -> Result<()> {
+    server_call(move |c| c.ban(&server_id, &peer_id)).await
+}
+
+pub async fn unban(server_id: String, peer_id: String) -> Result<()> {
+    server_call(move |c| c.unban(&server_id, &peer_id)).await
+}
+
+/// Only roles in the server's invite roles (default owner and admin).
+pub async fn create_invite(server_id: String, opts: InviteOptions) -> Result<CreatedInvite> {
+    server_call(move |c| c.create_invite(&server_id, opts)).await
+}
+
+pub async fn revoke_invite(invite_id: String) -> Result<()> {
+    server_call(move |c| c.revoke_invite(&invite_id)).await
+}
+
+/// Check an `umbra://join` link and describe it (show `owner_fingerprint`).
+pub async fn parse_invite(link: String) -> Result<InvitePreview> {
+    server_call(move |c| c.parse_invite(&link)).await
+}
+
+/// Join with an `umbra://join` link (network must be started). Returns with
+/// status `Joining`; `ServerEvent::Joined` follows. Errors if refused.
+pub async fn join_server(link: String, display_name: Option<String>) -> Result<ServerInfo> {
+    match backend()? {
+        Backend::Mock(_) => bail!("servers are not available in mock mode yet"),
+        Backend::Real(c) => {
+            on_runtime(async move { c.join_server(&link, display_name).await }).await
+        }
+    }
+}
+
+pub async fn join_requests(server_id: String) -> Result<Vec<JoinRequest>> {
+    server_call(move |c| c.join_requests(&server_id)).await
+}
+
+/// Admit (`approve = true`) or drop a request for an approval invite.
+pub async fn approve_join(server_id: String, peer_id: String, approve: bool) -> Result<()> {
+    server_call(move |c| c.approve_join(&server_id, &peer_id, approve)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

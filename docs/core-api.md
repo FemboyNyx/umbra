@@ -276,7 +276,7 @@ struct EnvelopeMeta { seq: Option<u64>, prev: Option<String>, expires_at: Option
   expires_at / local_identity`, and `messages.seq / prev_hash / expires_at`.
   Schema v4 adds the anti-replay tables `group_seen`, `seq_seen` and
   `seq_out` (new tables only). servers.md's Phase 1 tables ("schema v3"
-  there) will be v5.
+  there) are v5; see *Servers, Phase 1*.
 
 ### Anti-replay (Phase 0, [message-protection.md](message-protection.md#anti-replay))
 
@@ -368,6 +368,187 @@ outbound rotation (no Megolm yet), the `Heads` exchange after `Hello`
 (Phase 1), bumping the epoch on expiry runs, and the FFI / UI side (these
 calls are engine-level; the app can't call `check_epoch` or show "This
 device's data was restored from an older copy" until they're exposed).
+
+## Servers, Phase 1: model, roles, channels and invites (FFI)
+
+The server model from [servers.md](servers.md) ("Membership, roles and
+moderation", "Invites and joining"). Exposed over the FFI (`api/umbra.rs`);
+all calls are `async`, and in mock mode they return an error ("servers are
+not available in mock mode yet"). Per-sender Megolm, channel messages,
+files, host audits and expiry come in later PRs. Until then servers have a
+roster, roles, channels and invites, but no messages.
+
+```rust
+// Servers
+async fn create_server(name: String, recovery_keys: Vec<String>,
+                       display_name: Option<String>) -> Result<CreatedServer>;
+async fn list_servers() -> Result<Vec<ServerInfo>>;
+async fn server_info(server_id: String) -> Result<ServerInfo>;
+async fn leave_server(server_id: String) -> Result<()>;
+// Channels (text only)
+async fn list_channels(server_id: String) -> Result<Vec<ServerChannel>>;
+async fn create_channel(server_id: String, name: String) -> Result<ServerChannel>;   // owner, admins
+async fn rename_channel(server_id: String, channel_id: String, name: String) -> Result<()>;
+// Roles, policy, moderation
+async fn list_members(server_id: String) -> Result<Vec<ServerMember>>;
+async fn set_role(server_id: String, peer_id: String, role: ServerRole) -> Result<()>; // owner
+async fn set_invite_roles(server_id: String, roles: Vec<ServerRole>) -> Result<()>;   // owner
+async fn set_history_shared(server_id: String, shared: bool) -> Result<()>;           // owner
+async fn set_server_display_name(server_id: String, display_name: Option<String>) -> Result<()>;
+async fn kick(server_id: String, peer_id: String) -> Result<()>;   // owner; admins on members
+async fn ban(server_id: String, peer_id: String) -> Result<()>;
+async fn unban(server_id: String, peer_id: String) -> Result<()>;
+// Invites and joining
+async fn create_invite(server_id: String, opts: InviteOptions) -> Result<CreatedInvite>;
+async fn revoke_invite(invite_id: String) -> Result<()>;
+async fn parse_invite(link: String) -> Result<InvitePreview>;
+async fn join_server(link: String, display_name: Option<String>) -> Result<ServerInfo>;
+async fn join_requests(server_id: String) -> Result<Vec<JoinRequest>>;
+async fn approve_join(server_id: String, peer_id: String, approve: bool) -> Result<()>;
+```
+
+Events arrive as `CoreEvent::Server { server_id, event: ServerEvent }`, with
+`ServerEvent` one of `Joined`, `Updated { seq }`, `MemberJoined { peer_id }`,
+`MemberLeft { peer_id, reason }`, `JoinRequest { request }`,
+`ManifestRollback { have, got }`, `Forked { seq }` and `Removed { reason }`
+(`MemberLeftReason`: `Left | Kicked | Banned`). The app maps them to one
+`ServerActivity` event for now; there is no server UI yet.
+
+**Defaults (Nyx).**
+* **History**: new members see prior history by default. This is a
+  per-server setting, `policy.history` in the manifest (`ServerInfo.
+  history_shared`, default `true`). Only the owner changes it, with
+  `set_history_shared`. Each member's local `server_memberships.
+  history_visibility` follows the manifest. Megolm (PR 2) enforces it.
+* **Identity**: one default identity (the device's PeerId and Olm keys) in
+  every server. `display_name` on `create_server` / `join_server` and
+  `set_server_display_name` set the name shown in that server only
+  (`ServerInfo.my_display_name`; `None` = the global name). The card v2
+  signature covers only the PeerId and identity key, so the name can differ
+  per server without a new identity. Separate per-server identities
+  (`ServerIdentity::Dedicated`) stay optional and are not implemented yet.
+  On the owner device, a name change rewrites the roster entry at once.
+  Other members' new names apply from their next join, because PR 1 has no
+  profile op.
+* **Invites**: authorized only. The roles in `policy.invite` may create
+  invites (default owner and admin; the owner always may). An invite lasts
+  7 days and has 1 use by default (at most 1000 uses), optionally with
+  approval.
+
+**Model** (`engine/server_model.rs`).
+* **`ServerManifest`** (CBOR, signed with the owner key `K_S` under the
+  context `umbra-manifest-v1`). Fields: `server_id` (`None` only at genesis),
+  `seq`, `prev` (SHA-256 of the previous signed bytes), `owner`, `recovery`
+  (1 to 3 keys, required, none equal to `owner`), `name`, `icon`, `channels`,
+  `roster` (v2 cards **without addresses**, plus `role`, `added_by` and
+  `added_seq`), `bans`, `hosts`, `packs`, `policy` and `takeover`.
+  * The **ServerId** is the base64url SHA-256 of the signed genesis bytes.
+  * A **ChannelId** is 16 random bytes in base64url.
+  * Manifests are at most 256 KiB, and so are `ServerManifest` payloads.
+    Other kinds stay at 64 KiB (`servers::max_server_payload`).
+* **`K_S`** is generated on `create_server`, kept only in the `servers`
+  table, and never crosses the FFI. When no recovery keys are given, one is
+  generated and its secret is returned once in `CreatedServer.
+  recovery_secret`; core never stores it.
+* **Accepting a manifest** (`check_next`):
+  * `seq + 1` needs `prev` to match and a signature by the current `owner`,
+    or by one of the current `recovery` keys when `takeover` is set.
+  * A gap is accepted only if the same owner key signs it.
+  * A lower seq is a **rollback** (S5). It is refused and raises
+    `ManifestRollback`.
+  * The same seq with different bytes, validly signed, is a **fork**. It is
+    stored in `manifest_forks`, the server is **frozen** read-only
+    (`ServerStatus::Frozen`), and `Forked` is raised.
+  * A joiner's first manifest is anchored on the owner key named in the
+    invite (`check_first`). The invite preview shows that key's
+    fingerprint.
+* **`RosterOp`** (`Admit | Kick | Ban | Unban | DeleteMessage |
+  CreateChannel | EditChannel`). Each op carries `server_id`, `base_seq`,
+  `ts`, the signer's PeerId and its Ed25519 key, and is signed with the
+  signer's device key (context `umbra-roster-op-v1`). Rules:
+  * The signer needs the permission in the manifest at `base_seq`, which
+    must be the current manifest.
+  * Admins act only on members, never on the owner or other admins.
+  * `Admit` must carry an unexpired invite that the signer itself signed.
+  * A **ban beats an admit**.
+  * An **unban needs a newer `base_seq`** than the ban.
+  * Ops apply in (`ts`, hash) order, so every member computes the same
+    effective state.
+* **Who changes what.** The **owner device writes manifests directly**, and
+  only the owner changes roles, permissions, recovery keys and hosts. Admins
+  send ops. The owner **folds** every accepted op into the next manifest
+  straight away. An op on an older base (for example two admin ops before the
+  fold) is rebased by the owner if it is at most 16 manifests old and the
+  signer still holds the permission; unbans are never rebased. Ops older
+  than the current manifest are pruned.
+* **Distribution.** Manifests and ops go to every co-member through the
+  outbox as `ServerManifest` / `ServerOp` payloads, and the engine consumes
+  them (`subscribe_server` no longer sees those two kinds). Co-member
+  records follow the effective roster, so pins, `KeyChanged { Roster }` and
+  `server_ok` checks apply as in Phase 0. A removed member is no longer a
+  co-member, so the outbox drops it; it gets the new manifest once, best
+  effort and directly, then shows `Removed`.
+* **Permissions** (`Permission`): `Invite` (roles in `policy.invite`), plus
+  `ManageChannels`, `Kick`, `Ban` and `DeleteMessages` (owner and admins).
+  Channels have read and post role lists (default: everyone), and `list_channels`
+  reports `can_read` / `can_post` for us.
+
+**Invites and joining.**
+* **Link format**: `umbra://join?i=<base64url CBOR SignedInvite>&s=<base64url
+  32-byte secret>`.
+  * The signed part (context `umbra-invite-v1`, signed by the inviter's
+    device key) holds `server_id`, `owner_key`, `server_name`, the inviter's
+    v2 card (with addresses, so the joiner can dial), `invite_id`, the
+    **SHA-256 of the secret**, `expires_at`, `max_uses`, `needs_approval` and
+    `hosts`.
+  * Only the hash is signed, so an `Admit` op can carry the invite to other
+    members without the secret.
+  * The inviter stores the secret with the invite in `server_invites`.
+* **`JoinHello`**. The joiner sends `JoinHello { card, server_id, invite_id,
+  proof }` on `/umbra/msg/1`, with `proof = HMAC-SHA256(secret,
+  "umbra-join-v1" || joiner PeerId bytes)`. A proof can't be replayed by
+  another peer. `JoinHello` has its own token bucket. The inviter answers
+  one of:
+  * `Ok`: admitted, or waiting for approval;
+  * `Rejected(InviteInvalid)`: an unknown, expired, revoked or used-up
+    invite, or a bad proof;
+  * `Rejected(NotAuthorized)`: we may no longer invite, or the server is
+    frozen, removed or full (250 members);
+  * `Rejected(Banned)`.
+* **Admitting.** The use count is taken atomically. Then:
+  * The owner writes a manifest with the joiner in it.
+  * An admin signs an `Admit` op and sends the joiner the current manifest
+    and its ops.
+  * The joiner shows `Joining` until the first manifest (and, for an admin
+    invite, the `Admit` op) arrives, then raises `Joined`.
+  * A refusal undoes the joiner's local records.
+* **Approval invites** raise `JoinRequest` on the inviter. `approve_join`
+  uses one invite use and admits the joiner.
+
+**Store: schema v5** (`store_servers.rs`). The new tables are `servers`,
+`manifests`, `manifest_forks`, `roster_ops`, `server_channels` and
+`server_roles` (the effective state, materialized), plus `server_invites`,
+`join_requests` and `pending_joins`.
+* Every table is `CREATE TABLE IF NOT EXISTS`.
+* The schema batch now runs **inside the migration transaction**, so a
+  failed open (for example a newer `schema_version`) leaves no v5 tables
+  behind, and re-running is a no-op.
+* `leave_server` deletes all of a server's rows, its co-member records and
+  its queued server payloads. It drops Olm sessions with peers we no longer
+  share anything with.
+
+**Not in PR 1:**
+* Ownership transfer and recovery takeover from the API. The model checks
+  them.
+* A signed `Leave` op. Leaving is local, and the owner still lists us until
+  it kicks us.
+* Telling a joiner that a request was declined.
+* Re-sending an admin op that the owner dropped because it was more than
+  16 manifests stale.
+* Address discovery for co-members beyond the inviter and the connection
+  (roster cards carry no addresses; the DHT and hosts come later).
+* `DeleteMessage` has no API until channel messages exist (PR 2).
+* `hosts` grants (`umbra-host`, below) are not yet sent from core.
 
 ## Messaging
 
@@ -470,7 +651,9 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
 * **`/umbra/msg/1`** (CBOR): `Hello { card }` (once per connection) or
   `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
   `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch |
-  RateLimited | NotAMember | Replayed)`. (Older cores can't decode
+  RateLimited | NotAMember | Replayed | InviteInvalid | NotAuthorized |
+  Banned)`. `JoinHello { card, server_id, invite_id, proof }` asks to join a
+  server (see *Servers, Phase 1*). (Older cores can't decode
   `Replayed`; only new cores send it, and only for payloads carrying `seq`,
   which only new cores send.)
   Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal | Server,
@@ -486,7 +669,7 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
   backward-compatible both ways: older cores parse padded payloads, and new
   cores accept unpadded ones. The receiver strips trailing whitespace before
   parsing. The usable caps don't change (text 64 KiB, signal payload 64 KiB,
-  server data 64 KiB). Padding hides lengths within a bucket, not message
+  server data 64 KiB, manifests 256 KiB). Padding hides lengths within a bucket, not message
   counts or timing. (`proto::{PAD_BUCKETS, padded_len, encode_payload,
   decode_payload}`.)
 * **Server payload carrier (Phase 0)**: `PayloadBody::Server { server_id,
@@ -521,6 +704,7 @@ tests; the bridge uses the defaults).
 | Constant | Default | Effect |
 |---|---|---|
 | `HELLO_BURST` / `HELLO_REFILL` | 5 / 1 per 10 s | Per-peer token bucket on `Hello` (contacts too). Excess gets `Rejected(RateLimited)`. |
+| `JOIN_HELLO_BURST` / `JOIN_HELLO_REFILL` | 3 / 1 per 20 s | Per-peer bucket on `JoinHello`, separate from `Hello`. |
 | `CONTACT_REQUEST_WINDOW` | 10 min | At most one `ContactRequest` event per unknown identity per window. |
 | `CONTACT_REQUEST_BURST` / `_REFILL` | 10 / 1 per 10 s | Global budget of `ContactRequest` events (sybil floods). |
 | `MAX_PENDING_CONTACT_REQUESTS` | 64 | Distinct unanswered requesters tracked; beyond that new requests are dropped (logged). `add_contact` frees a slot. |

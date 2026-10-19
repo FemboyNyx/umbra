@@ -485,6 +485,9 @@ class UmbraController extends ChangeNotifier {
           source: source,
         );
         unawaited(_refreshLists());
+      case ServerActivity():
+        // No server UI yet (Phase 1 PR 1 is core only).
+        return;
     }
     notifyListeners();
   }

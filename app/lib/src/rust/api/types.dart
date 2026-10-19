@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'types.freezed.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `hash`, `hash`, `hash`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `hash`, `hash`, `hash`
 
 class Contact {
   final String peerId;
@@ -276,6 +276,67 @@ sealed class CoreEvent with _$CoreEvent {
     required String newSafetyNumber,
     required KeyChangeSource source,
   }) = CoreEvent_KeyChanged;
+
+  /// Something happened in a server (see [`ServerEvent`]).
+  const factory CoreEvent.server({
+    required String serverId,
+    required ServerEvent event,
+  }) = CoreEvent_Server;
+}
+
+class CreatedInvite {
+  final String inviteId;
+
+  /// `umbra://join?...`; contains the bearer secret.
+  final String link;
+  final PlatformInt64 expiresAtMs;
+  final int maxUses;
+
+  const CreatedInvite({
+    required this.inviteId,
+    required this.link,
+    required this.expiresAtMs,
+    required this.maxUses,
+  });
+
+  @override
+  int get hashCode =>
+      inviteId.hashCode ^
+      link.hashCode ^
+      expiresAtMs.hashCode ^
+      maxUses.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CreatedInvite &&
+          runtimeType == other.runtimeType &&
+          inviteId == other.inviteId &&
+          link == other.link &&
+          expiresAtMs == other.expiresAtMs &&
+          maxUses == other.maxUses;
+}
+
+/// Returned once by `create_server`.
+class CreatedServer {
+  final ServerInfo server;
+
+  /// Generated recovery secret (base64url), shown to the user once and
+  /// never stored by core. `None` if recovery keys were supplied.
+  final String? recoverySecret;
+
+  const CreatedServer({required this.server, this.recoverySecret});
+
+  @override
+  int get hashCode => server.hashCode ^ recoverySecret.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CreatedServer &&
+          runtimeType == other.runtimeType &&
+          server == other.server &&
+          recoverySecret == other.recoverySecret;
 }
 
 enum DeliveryStatus {
@@ -292,6 +353,128 @@ enum DeliveryStatus {
   received,
 }
 
+class InviteOptions {
+  /// Default 7 days.
+  final BigInt? ttlSecs;
+
+  /// Default 1, at most 1000.
+  final int? maxUses;
+
+  /// The inviter must call `approve_join` for each joiner.
+  final bool needsApproval;
+
+  const InviteOptions({
+    this.ttlSecs,
+    this.maxUses,
+    required this.needsApproval,
+  });
+
+  static Future<InviteOptions> default_() =>
+      RustLib.instance.api.crateApiTypesInviteOptionsDefault();
+
+  @override
+  int get hashCode =>
+      ttlSecs.hashCode ^ maxUses.hashCode ^ needsApproval.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is InviteOptions &&
+          runtimeType == other.runtimeType &&
+          ttlSecs == other.ttlSecs &&
+          maxUses == other.maxUses &&
+          needsApproval == other.needsApproval;
+}
+
+/// What `parse_invite` shows before joining.
+class InvitePreview {
+  final String serverId;
+  final String serverName;
+  final String ownerFingerprint;
+  final ContactCard inviter;
+  final String inviteId;
+  final PlatformInt64 expiresAtMs;
+  final bool needsApproval;
+
+  /// Host PeerIds named in the invite.
+  final List<String> hosts;
+  final bool expired;
+  final bool alreadyMember;
+
+  const InvitePreview({
+    required this.serverId,
+    required this.serverName,
+    required this.ownerFingerprint,
+    required this.inviter,
+    required this.inviteId,
+    required this.expiresAtMs,
+    required this.needsApproval,
+    required this.hosts,
+    required this.expired,
+    required this.alreadyMember,
+  });
+
+  @override
+  int get hashCode =>
+      serverId.hashCode ^
+      serverName.hashCode ^
+      ownerFingerprint.hashCode ^
+      inviter.hashCode ^
+      inviteId.hashCode ^
+      expiresAtMs.hashCode ^
+      needsApproval.hashCode ^
+      hosts.hashCode ^
+      expired.hashCode ^
+      alreadyMember.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is InvitePreview &&
+          runtimeType == other.runtimeType &&
+          serverId == other.serverId &&
+          serverName == other.serverName &&
+          ownerFingerprint == other.ownerFingerprint &&
+          inviter == other.inviter &&
+          inviteId == other.inviteId &&
+          expiresAtMs == other.expiresAtMs &&
+          needsApproval == other.needsApproval &&
+          hosts == other.hosts &&
+          expired == other.expired &&
+          alreadyMember == other.alreadyMember;
+}
+
+class JoinRequest {
+  final String serverId;
+  final ContactCard card;
+  final String inviteId;
+  final PlatformInt64 requestedAtMs;
+
+  const JoinRequest({
+    required this.serverId,
+    required this.card,
+    required this.inviteId,
+    required this.requestedAtMs,
+  });
+
+  @override
+  int get hashCode =>
+      serverId.hashCode ^
+      card.hashCode ^
+      inviteId.hashCode ^
+      requestedAtMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is JoinRequest &&
+          runtimeType == other.runtimeType &&
+          serverId == other.serverId &&
+          card == other.card &&
+          inviteId == other.inviteId &&
+          requestedAtMs == other.requestedAtMs;
+}
+
 /// Where a changed identity key was seen.
 enum KeyChangeSource {
   /// The peer's `Hello` on a new connection.
@@ -305,6 +488,13 @@ enum KeyChangeSource {
 
   /// A server roster entry (co-member card) for this peer.
   roster,
+}
+
+enum MemberLeftReason {
+  /// Left, or dropped from the roster by the owner without a ban.
+  left,
+  kicked,
+  banned,
 }
 
 class Message {
@@ -443,6 +633,225 @@ class SelfInfo {
           identityKey == other.identityKey &&
           ed25519Key == other.ed25519Key &&
           addrs == other.addrs;
+}
+
+class ServerChannel {
+  /// 16 random bytes, base64url.
+  final String id;
+  final String name;
+  final bool canRead;
+  final bool canPost;
+  final List<ServerRole> readRoles;
+  final List<ServerRole> postRoles;
+
+  const ServerChannel({
+    required this.id,
+    required this.name,
+    required this.canRead,
+    required this.canPost,
+    required this.readRoles,
+    required this.postRoles,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      canRead.hashCode ^
+      canPost.hashCode ^
+      readRoles.hashCode ^
+      postRoles.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServerChannel &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          canRead == other.canRead &&
+          canPost == other.canPost &&
+          readRoles == other.readRoles &&
+          postRoles == other.postRoles;
+}
+
+@freezed
+sealed class ServerEvent with _$ServerEvent {
+  const ServerEvent._();
+
+  /// The first manifest arrived after `join_server`: we're in.
+  const factory ServerEvent.joined() = ServerEvent_Joined;
+
+  /// A new manifest or roster op was applied.
+  const factory ServerEvent.updated({required BigInt seq}) =
+      ServerEvent_Updated;
+  const factory ServerEvent.memberJoined({required String peerId}) =
+      ServerEvent_MemberJoined;
+  const factory ServerEvent.memberLeft({
+    required String peerId,
+    required MemberLeftReason reason,
+  }) = ServerEvent_MemberLeft;
+
+  /// Someone used an approval-required invite of ours.
+  const factory ServerEvent.joinRequest({required JoinRequest request}) =
+      ServerEvent_JoinRequest;
+
+  /// A manifest older than the newest seen was offered and refused.
+  const factory ServerEvent.manifestRollback({
+    required BigInt have,
+    required BigInt got,
+  }) = ServerEvent_ManifestRollback;
+
+  /// Two different manifests for one seq: the server is frozen read-only.
+  const factory ServerEvent.forked({required BigInt seq}) = ServerEvent_Forked;
+
+  /// We are no longer in the server.
+  const factory ServerEvent.removed({required MemberLeftReason reason}) =
+      ServerEvent_Removed;
+}
+
+class ServerInfo {
+  final String serverId;
+  final String name;
+
+  /// Fingerprint of the owner key the server is anchored on (show it in
+  /// the join preview and server settings).
+  final String ownerFingerprint;
+
+  /// Our role; `None` while joining or after removal.
+  final ServerRole? myRole;
+  final ServerStatus status;
+  final MemberLeftReason? removedReason;
+
+  /// Current manifest seq.
+  final BigInt seq;
+  final int memberCount;
+  final int channelCount;
+
+  /// Roles that may create invites (owner always may).
+  final List<ServerRole> inviteRoles;
+
+  /// History for new members: `true` = shared (default), `false` = from join.
+  final bool historyShared;
+
+  /// Host ciphertext retention, days (at most 30).
+  final int retentionDays;
+
+  /// We hold the owner key on this device.
+  final bool isOwnerDevice;
+
+  /// Our display name in this server; `None` = the global one. Same
+  /// (default) identity everywhere; only the name is per server.
+  final String? myDisplayName;
+
+  const ServerInfo({
+    required this.serverId,
+    required this.name,
+    required this.ownerFingerprint,
+    this.myRole,
+    required this.status,
+    this.removedReason,
+    required this.seq,
+    required this.memberCount,
+    required this.channelCount,
+    required this.inviteRoles,
+    required this.historyShared,
+    required this.retentionDays,
+    required this.isOwnerDevice,
+    this.myDisplayName,
+  });
+
+  @override
+  int get hashCode =>
+      serverId.hashCode ^
+      name.hashCode ^
+      ownerFingerprint.hashCode ^
+      myRole.hashCode ^
+      status.hashCode ^
+      removedReason.hashCode ^
+      seq.hashCode ^
+      memberCount.hashCode ^
+      channelCount.hashCode ^
+      inviteRoles.hashCode ^
+      historyShared.hashCode ^
+      retentionDays.hashCode ^
+      isOwnerDevice.hashCode ^
+      myDisplayName.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServerInfo &&
+          runtimeType == other.runtimeType &&
+          serverId == other.serverId &&
+          name == other.name &&
+          ownerFingerprint == other.ownerFingerprint &&
+          myRole == other.myRole &&
+          status == other.status &&
+          removedReason == other.removedReason &&
+          seq == other.seq &&
+          memberCount == other.memberCount &&
+          channelCount == other.channelCount &&
+          inviteRoles == other.inviteRoles &&
+          historyShared == other.historyShared &&
+          retentionDays == other.retentionDays &&
+          isOwnerDevice == other.isOwnerDevice &&
+          myDisplayName == other.myDisplayName;
+}
+
+class ServerMember {
+  final String peerId;
+  final String displayName;
+  final ServerRole role;
+  final String addedBy;
+  final bool isSelf;
+  final bool isContact;
+
+  const ServerMember({
+    required this.peerId,
+    required this.displayName,
+    required this.role,
+    required this.addedBy,
+    required this.isSelf,
+    required this.isContact,
+  });
+
+  @override
+  int get hashCode =>
+      peerId.hashCode ^
+      displayName.hashCode ^
+      role.hashCode ^
+      addedBy.hashCode ^
+      isSelf.hashCode ^
+      isContact.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServerMember &&
+          runtimeType == other.runtimeType &&
+          peerId == other.peerId &&
+          displayName == other.displayName &&
+          role == other.role &&
+          addedBy == other.addedBy &&
+          isSelf == other.isSelf &&
+          isContact == other.isContact;
+}
+
+enum ServerRole { owner, admin, member }
+
+enum ServerStatus {
+  /// Normal.
+  active,
+
+  /// `join_server` sent; waiting for the first manifest (or approval).
+  joining,
+
+  /// Two different manifests with the same seq were seen: read-only.
+  frozen,
+
+  /// We were kicked or banned (`removed_reason`), or the join was refused.
+  removed,
 }
 
 /// Call signaling message kinds, carried encrypted by core for `calls/`.

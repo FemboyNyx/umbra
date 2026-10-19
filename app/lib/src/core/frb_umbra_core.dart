@@ -201,6 +201,7 @@ app.CoreEvent _event(rust.CoreEvent event) {
           newSafetyNumber: newSafetyNumber,
           source: _source(source),
         ),
+    server: (serverId, _) => app.ServerActivity(serverId),
   );
 }
 

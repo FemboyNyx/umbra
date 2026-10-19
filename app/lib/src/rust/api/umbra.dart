@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'types.dart';
 
-// These functions are ignored because they are not marked as `pub`: `backend`, `on_runtime`
+// These functions are ignored because they are not marked as `pub`: `backend`, `on_runtime`, `server_call`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Backend`, `Global`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`
 
@@ -117,4 +117,142 @@ Future<void> sendSignal({
   callId: callId,
   kind: kind,
   payload: payload,
+);
+
+/// Create a server we own, with a `general` text channel. `recovery_keys`:
+/// 1 to 3 Ed25519 public keys (base64); empty = generate one and return its
+/// secret once in `CreatedServer.recovery_secret` (core never stores it).
+/// `display_name`: our name in this server (`None` = the global one).
+Future<CreatedServer> createServer({
+  required String name,
+  required List<String> recoveryKeys,
+  String? displayName,
+}) => RustLib.instance.api.crateApiUmbraCreateServer(
+  name: name,
+  recoveryKeys: recoveryKeys,
+  displayName: displayName,
+);
+
+Future<List<ServerInfo>> listServers() =>
+    RustLib.instance.api.crateApiUmbraListServers();
+
+Future<ServerInfo> serverInfo({required String serverId}) =>
+    RustLib.instance.api.crateApiUmbraServerInfo(serverId: serverId);
+
+/// Leave and delete everything kept about the server.
+Future<void> leaveServer({required String serverId}) =>
+    RustLib.instance.api.crateApiUmbraLeaveServer(serverId: serverId);
+
+Future<List<ServerChannel>> listChannels({required String serverId}) =>
+    RustLib.instance.api.crateApiUmbraListChannels(serverId: serverId);
+
+/// Owner and admins.
+Future<ServerChannel> createChannel({
+  required String serverId,
+  required String name,
+}) => RustLib.instance.api.crateApiUmbraCreateChannel(
+  serverId: serverId,
+  name: name,
+);
+
+/// Owner and admins.
+Future<void> renameChannel({
+  required String serverId,
+  required String channelId,
+  required String name,
+}) => RustLib.instance.api.crateApiUmbraRenameChannel(
+  serverId: serverId,
+  channelId: channelId,
+  name: name,
+);
+
+Future<List<ServerMember>> listMembers({required String serverId}) =>
+    RustLib.instance.api.crateApiUmbraListMembers(serverId: serverId);
+
+/// Owner only: `Admin` or `Member` (no ownership transfer yet).
+Future<void> setRole({
+  required String serverId,
+  required String peerId,
+  required ServerRole role,
+}) => RustLib.instance.api.crateApiUmbraSetRole(
+  serverId: serverId,
+  peerId: peerId,
+  role: role,
+);
+
+/// Owner only: roles that may create invites (the owner always may).
+Future<void> setInviteRoles({
+  required String serverId,
+  required List<ServerRole> roles,
+}) => RustLib.instance.api.crateApiUmbraSetInviteRoles(
+  serverId: serverId,
+  roles: roles,
+);
+
+/// Owner only: whether new members see history from before they joined.
+/// Default `true`.
+Future<void> setHistoryShared({
+  required String serverId,
+  required bool shared,
+}) => RustLib.instance.api.crateApiUmbraSetHistoryShared(
+  serverId: serverId,
+  shared: shared,
+);
+
+/// Our display name in this server (`None` = the global one).
+Future<void> setServerDisplayName({
+  required String serverId,
+  String? displayName,
+}) => RustLib.instance.api.crateApiUmbraSetServerDisplayName(
+  serverId: serverId,
+  displayName: displayName,
+);
+
+/// Owner, or admins on members.
+Future<void> kick({required String serverId, required String peerId}) =>
+    RustLib.instance.api.crateApiUmbraKick(serverId: serverId, peerId: peerId);
+
+/// Owner, or admins on members.
+Future<void> ban({required String serverId, required String peerId}) =>
+    RustLib.instance.api.crateApiUmbraBan(serverId: serverId, peerId: peerId);
+
+Future<void> unban({required String serverId, required String peerId}) =>
+    RustLib.instance.api.crateApiUmbraUnban(serverId: serverId, peerId: peerId);
+
+/// Only roles in the server's invite roles (default owner and admin).
+Future<CreatedInvite> createInvite({
+  required String serverId,
+  required InviteOptions opts,
+}) => RustLib.instance.api.crateApiUmbraCreateInvite(
+  serverId: serverId,
+  opts: opts,
+);
+
+Future<void> revokeInvite({required String inviteId}) =>
+    RustLib.instance.api.crateApiUmbraRevokeInvite(inviteId: inviteId);
+
+/// Check an `umbra://join` link and describe it (show `owner_fingerprint`).
+Future<InvitePreview> parseInvite({required String link}) =>
+    RustLib.instance.api.crateApiUmbraParseInvite(link: link);
+
+/// Join with an `umbra://join` link (network must be started). Returns with
+/// status `Joining`; `ServerEvent::Joined` follows. Errors if refused.
+Future<ServerInfo> joinServer({required String link, String? displayName}) =>
+    RustLib.instance.api.crateApiUmbraJoinServer(
+      link: link,
+      displayName: displayName,
+    );
+
+Future<List<JoinRequest>> joinRequests({required String serverId}) =>
+    RustLib.instance.api.crateApiUmbraJoinRequests(serverId: serverId);
+
+/// Admit (`approve = true`) or drop a request for an approval invite.
+Future<void> approveJoin({
+  required String serverId,
+  required String peerId,
+  required bool approve,
+}) => RustLib.instance.api.crateApiUmbraApproveJoin(
+  serverId: serverId,
+  peerId: peerId,
+  approve: approve,
 );

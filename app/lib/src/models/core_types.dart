@@ -320,6 +320,13 @@ class KeyChanged extends CoreEvent {
   final KeyChangeSource source;
 }
 
+/// Something changed in a server. The app has no server UI yet, so only
+/// the server id is kept; the details are in core's `ServerEvent`.
+class ServerActivity extends CoreEvent {
+  const ServerActivity(this.serverId);
+  final String serverId;
+}
+
 /// Safety numbers from a [KeyChanged] event, kept so the warning can show
 /// both values after the contact list reloads.
 class MissedCallNotice {
