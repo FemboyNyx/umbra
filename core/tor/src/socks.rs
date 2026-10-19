@@ -24,8 +24,8 @@
 //!
 //! ## Recommended wiring for Elite
 //!
-//! Prefer an existing outbound-only crate such as [`libp2p-socks5`]
-//! (https://crates.io/crates/libp2p-socks5) pointed at the proxy address,
+//! Prefer an existing outbound-only crate such as
+//! [`libp2p-socks5`](https://crates.io/crates/libp2p-socks5) pointed at the proxy address,
 //! composed **instead of** clearnet TCP — never as a silent fallback beside it.
 //! Mixing Tor and clearnet transports on one swarm lets `identify` (and any
 //! `add_external_address`) correlate the two paths.

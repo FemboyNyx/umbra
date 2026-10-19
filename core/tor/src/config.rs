@@ -15,7 +15,14 @@ use std::path::{Path, PathBuf};
 pub struct TorConfig {
     state_dir: Option<PathBuf>,
     cache_dir: Option<PathBuf>,
+    /// EXPERIMENTAL (`tor-listen`): onion service nickname (keystore namespace).
+    #[cfg(feature = "tor-listen")]
+    onion_nickname: Option<String>,
 }
+
+/// Default onion service nickname when none is configured (`tor-listen`).
+#[cfg(feature = "tor-listen")]
+pub const DEFAULT_ONION_NICKNAME: &str = "umbra";
 
 impl TorConfig {
     /// Empty config: arti platform defaults.
@@ -41,6 +48,33 @@ impl TorConfig {
 
     pub fn cache_dir_path(&self) -> Option<&Path> {
         self.cache_dir.as_deref()
+    }
+
+    /// EXPERIMENTAL (`tor-listen`): nickname of the hosted onion service.
+    ///
+    /// The nickname selects the identity key in the keystore under
+    /// `<state_dir>/keystore/`, so keep it stable to keep the same `.onion`
+    /// address across restarts. Validated (arti `HsNickname` rules: lowercase
+    /// ASCII alphanumerics, `_`, `-`, not starting with `-`) when the listener
+    /// launches. Defaults to [`DEFAULT_ONION_NICKNAME`].
+    #[cfg(feature = "tor-listen")]
+    pub fn onion_nickname(mut self, nickname: impl Into<String>) -> Self {
+        self.onion_nickname = Some(nickname.into());
+        self
+    }
+
+    /// Configured onion nickname, or [`DEFAULT_ONION_NICKNAME`].
+    #[cfg(feature = "tor-listen")]
+    pub fn onion_nickname_or_default(&self) -> &str {
+        self.onion_nickname
+            .as_deref()
+            .unwrap_or(DEFAULT_ONION_NICKNAME)
+    }
+
+    /// Where arti's native keystore lives (`<state_dir>/keystore`), if a custom
+    /// state dir is set. Onion service identity keys are written **only** here.
+    pub fn keystore_dir(&self) -> Option<PathBuf> {
+        self.state_dir.as_ref().map(|s| s.join("keystore"))
     }
 
     /// `true` when at least one custom directory was set.

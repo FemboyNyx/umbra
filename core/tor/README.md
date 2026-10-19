@@ -6,6 +6,12 @@ Optional Tor routing spike for Umbra. Isolated under `core/tor/` so Elite's
 - **Default build**: multiaddr → [`TorTarget`] / [`SocksDest`], [`TorMode`], [`TorConfig`].
 - **`--features tor`**: embeds `arti-client` 0.35 and exposes [`TorTransport`]
   (dial-only `libp2p::core::Transport`), with configurable state/cache dirs for Android.
+- **`--features tor-listen`** (**EXPERIMENTAL**, off by default, implies `tor`):
+  `listen_on(umbra_tor::onion_listen_addr(port))` hosts a v3 onion service via
+  arti's experimental onion-service support. Keys live only in
+  `<state_dir>/keystore` (requires `TorConfig` with custom dirs, `0700`);
+  nickname via `TorConfig::onion_nickname`. No client auth / PoW yet; see
+  `docs/tor.md` for limitations.
 
 See [`docs/tor.md`](../../docs/tor.md).
 
@@ -38,18 +44,36 @@ In `core/Cargo.toml` (already stubbed by Elite):
    let tor = umbra_tor::TorTransport::bootstrapped_with(cfg).await?;
    ```
 
+4. Optional, EXPERIMENTAL inbound onion listening — forward the feature and
+   keep it out of default/release features:
+
+   ```toml
+   [features]
+   tor-listen = ["tor", "umbra-tor/tor-listen"]
+   ```
+
+   ```rust
+   swarm.listen_on(umbra_tor::onion_listen_addr(4001))?; // NewAddress → /onion3/<own>:4001
+   ```
+
 ## Develop
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"   # rustup proxies honour core/rust-toolchain.toml
 cd core && rustup toolchain install && cd tor
+# NOTE: until Elite enables the "tor" workspace member, run these with the
+# member temporarily uncommented in core/Cargo.toml (cargo refuses a package
+# that thinks it's in a workspace but isn't listed).
 cargo fmt
 cargo test
 cargo test --features tor
+cargo test --features tor-listen
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features tor -- -D warnings
+cargo clippy --all-targets --features tor-listen -- -D warnings
 ```
 
-Toolchain is pinned only in `core/rust-toolchain.toml`; `rust-version` = 1.89 is just the floor (vodozemac 0.11). arti 0.35 shares rusqlite **0.37**;
-`tor` feature enables arti `static-sqlite` (no system libsqlite3)
-with `umbra_core` — bump them together.
+Toolchain is pinned only in `core/rust-toolchain.toml`; `rust-version` = 1.89 is
+just the floor (vodozemac 0.11). arti 0.35 shares rusqlite **0.37** with
+`umbra_core` — bump them together. The `tor` feature enables arti
+`static-sqlite` (no system libsqlite3).
