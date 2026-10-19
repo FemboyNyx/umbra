@@ -15,6 +15,7 @@ use vodozemac::Curve25519PublicKey;
 
 use crate::api::types::*;
 use crate::engine::crypto::{fingerprint_of, Crypto, Identity};
+use crate::engine::epoch::{self, Epoch};
 use crate::engine::events::EventHub;
 use crate::engine::limits::{KeyedBuckets, Limits, TokenBucket};
 use crate::engine::net::{self, NetConfig, NetHandle, TransportMode};
@@ -27,6 +28,18 @@ use crate::engine::{qr, safety};
 
 pub const DB_FILE: &str = "umbra.db";
 const META_DISPLAY_NAME: &str = "display_name";
+const META_EPOCH: &str = "epoch";
+const META_EPOCH_HISTORY: &str = "epoch_history";
+const META_RESTORED_AT: &str = "restored_at";
+
+/// Result of [`Core::check_epoch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpochStatus {
+    /// The current epoch: store it in the OS keystore next to `db_key`.
+    pub epoch: String,
+    /// A restore was detected and handled by this call.
+    pub restored: bool,
+}
 /// Undelivered messages older than this are marked `Failed`.
 pub const OUTBOX_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(25);
@@ -52,8 +65,9 @@ pub struct Core {
     peer_locks: Mutex<HashMap<PeerId, Arc<tokio::sync::Mutex<()>>>>,
     limits: Limits,
     limiter: Mutex<Limiter>,
-    #[cfg_attr(not(feature = "tor"), allow(dead_code))]
     data_dir: std::path::PathBuf,
+    /// Serializes epoch bumps (see `engine::epoch`).
+    epoch_lock: Mutex<()>,
     /// Engine-internal consumers of server payloads (Phase 1 server logic,
     /// tests). Never crosses the FFI.
     server_subs: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<ServerInbound>>>,
@@ -201,7 +215,12 @@ impl Core {
             limiter: Mutex::new(Limiter::new(&limits)),
             limits,
             server_subs: Mutex::new(Vec::new()),
+            epoch_lock: Mutex::new(()),
         }))
+        .and_then(|core: Arc<Self>| {
+            core.init_epoch()?;
+            Ok(core)
+        })
     }
 
     fn lim(&self) -> MutexGuard<'_, Limiter> {
@@ -1377,6 +1396,9 @@ impl Core {
     /// A fresh OTK if the requester (and everyone together) is under the
     /// outstanding caps, otherwise the reusable fallback key. Never blocks.
     fn issue_key(&self, peer: PeerId) -> Result<Curve25519PublicKey> {
+        // Before any one-time key leaves the pool (anti-rollback). Taken
+        // before the limiter lock: recovery holds the epoch lock, then that.
+        self.bump_epoch()?;
         let now = Instant::now();
         let l = &self.limits;
         let mut lim = self.lim();
@@ -1487,6 +1509,7 @@ impl Core {
         let pt = encode_payload(p).map_err(anyhow::Error::from)?;
         for _ in 0..2 {
             self.ensure_session(net, contact, peer).await?;
+            self.bump_epoch()?; // before the ratchet moves (anti-rollback)
             let (t, c) = self.crypto.encrypt(&contact.peer_id, &pt)?;
             match net.msg(peer, MsgRequest::Olm { t, c }).await? {
                 MsgResponse::Delivered => return Ok(()),
@@ -1668,6 +1691,144 @@ impl Core {
         )?;
         self.spawn_flush(peer);
         Ok(p.id)
+    }
+
+    // ---- restore detection (message-protection.md#anti-rollback) ----
+
+    fn db_epoch(&self) -> Result<Option<Epoch>> {
+        match self.store.meta_get(META_EPOCH)? {
+            None => Ok(None),
+            Some(v) => Ok(Some(String::from_utf8(v)?.parse()?)),
+        }
+    }
+
+    fn epoch_history(&self) -> Result<Vec<String>> {
+        Ok(match self.store.meta_get(META_EPOCH_HISTORY)? {
+            Some(v) => serde_json::from_slice(&v)?,
+            None => Vec::new(),
+        })
+    }
+
+    fn set_epoch(&self, e: &Epoch) -> Result<()> {
+        // Database first: a crash in between leaves the sidecar behind the
+        // database, which is not mistaken for a restore.
+        self.store.meta_set(META_EPOCH, e.to_string().as_bytes())?;
+        epoch::write_sidecar(&self.data_dir, e)
+    }
+
+    /// At open: compare the database's epoch with the sidecar file.
+    fn init_epoch(&self) -> Result<()> {
+        let _g = self.epoch_lock.lock().expect("epoch poisoned");
+        let Some(cur) = self.db_epoch()? else {
+            // New database (or one from before epochs): start one.
+            return self.set_epoch(&Epoch::fresh());
+        };
+        let restored = match epoch::read_sidecar(&self.data_dir) {
+            None => true, // a database without its sidecar was copied in
+            Some(w) => {
+                let ahead = epoch::witness_is_ahead(&cur, &self.epoch_history()?, &w);
+                if !ahead && w != cur {
+                    epoch::write_sidecar(&self.data_dir, &cur)?;
+                }
+                ahead
+            }
+        };
+        if restored {
+            self.recover_locked()?;
+        }
+        Ok(())
+    }
+
+    /// Advance the epoch counter (database and sidecar).
+    fn bump_epoch(&self) -> Result<()> {
+        let _g = self.epoch_lock.lock().expect("epoch poisoned");
+        let mut e = self.db_epoch()?.unwrap_or_else(Epoch::fresh);
+        e.n += 1;
+        self.set_epoch(&e)
+    }
+
+    /// The current epoch, `"<id>.<n>"`.
+    pub fn epoch(&self) -> Result<String> {
+        Ok(self
+            .db_epoch()?
+            .ok_or_else(|| anyhow!("no epoch"))?
+            .to_string())
+    }
+
+    /// Compare with the epoch the app kept outside the database (the OS
+    /// keystore copy next to `db_key`, from an earlier call). If that copy is
+    /// ahead, the database was restored from an older copy: recover (see
+    /// [`Self::recover_from_restore`]). Store the returned epoch back in the
+    /// keystore. `None` (nothing stored yet) only returns the current epoch.
+    pub fn check_epoch(&self, witness: Option<&str>) -> Result<EpochStatus> {
+        let _g = self.epoch_lock.lock().expect("epoch poisoned");
+        let cur = self.db_epoch()?.ok_or_else(|| anyhow!("no epoch"))?;
+        let restored = match witness {
+            None => false,
+            Some(w) => epoch::witness_is_ahead(&cur, &self.epoch_history()?, &w.parse()?),
+        };
+        if restored {
+            self.recover_locked()?;
+        }
+        Ok(EpochStatus {
+            epoch: self
+                .db_epoch()?
+                .ok_or_else(|| anyhow!("no epoch"))?
+                .to_string(),
+            restored,
+        })
+    }
+
+    /// Treat the database as restored from an older copy (the "restore
+    /// flag"; also run automatically when a restore is detected). Never
+    /// reuses key material from the old copy: drops every Olm session (the
+    /// next message to each peer starts a fresh one), forgets the published
+    /// one-time keys and rotates the fallback key, jumps every outgoing
+    /// sequence number forward by `SEQ_RESTORE_GAP` (renumbering queued
+    /// DMs), and moves to a new epoch. Returns the new epoch.
+    pub fn recover_from_restore(&self) -> Result<String> {
+        let _g = self.epoch_lock.lock().expect("epoch poisoned");
+        self.recover_locked()?;
+        self.epoch()
+    }
+
+    fn recover_locked(&self) -> Result<()> {
+        let sessions = self.crypto.reset_after_restore()?;
+        self.lim().outstanding_otks.clear();
+        self.store.seq_jump_all(SEQ_RESTORE_GAP)?;
+        for peer in self.store.outbox_peers()? {
+            let stream = dm_out_stream(&peer);
+            for r in self.store.outbox_for(&peer)? {
+                if r.item == OutboxItem::Dm {
+                    self.store
+                        .outbox_set_seq(&r.msg_id, self.store.seq_next(&stream)?)?;
+                }
+            }
+        }
+        let mut history = self.epoch_history()?;
+        if let Some(old) = self.db_epoch()? {
+            history.push(old.id);
+        }
+        self.store
+            .meta_set(META_EPOCH_HISTORY, &serde_json::to_vec(&history)?)?;
+        self.store
+            .meta_set(META_RESTORED_AT, now_ms().to_string().as_bytes())?;
+        let fresh = Epoch::fresh();
+        self.set_epoch(&fresh)?;
+        tracing::warn!(
+            sessions,
+            "this device's data was restored from an older copy; sessions and keys reset"
+        );
+        Ok(())
+    }
+
+    /// When a restore was last detected/handled (ms since the epoch).
+    pub fn last_restore_ms(&self) -> Result<Option<i64>> {
+        Ok(self
+            .store
+            .meta_get(META_RESTORED_AT)?
+            .and_then(|v| String::from_utf8(v).ok())
+            .and_then(|s| s.parse().ok()))
     }
 
     // ---- anti-replay hooks (message-protection.md#anti-replay) ----
@@ -2246,6 +2407,98 @@ mod tests {
             a.handle_msg(b.peer_id(), MsgRequest::Olm { t, c }),
             MsgResponse::Rejected(RejectReason::Malformed)
         );
+    }
+
+    fn reopen(dir: &Path, key: u8) -> Arc<Core> {
+        Core::open(dir, &[key; 32], CoreConfig::default(), EventHub::new()).unwrap()
+    }
+
+    fn claim(to: &Arc<Core>, from: &Arc<Core>) -> String {
+        match to.handle_keys(from.peer_id(), KeysRequest::ClaimOneTimeKey) {
+            KeysResponse::Key { one_time_key, .. } => one_time_key,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_from_an_old_copy_never_reuses_keys() {
+        let (a, _ra, da) = open(1);
+        let (b, _rb, _db) = open(2);
+        befriend(&a, &b).await;
+        let pb = b.peer_id().to_base58();
+        let db = da.path().join(DB_FILE);
+        let backup = da.path().join("backup.db");
+        assert!(matches!(open_session(&b, &a), KeysResponse::Key { .. }));
+        let m1 = a.send_text(&pb, "queued".into()).await.unwrap();
+        let fallback_before = a.crypto.fallback_key().unwrap();
+
+        // Take a backup (closed database, so nothing is left in the WAL).
+        drop(a);
+        std::fs::copy(&db, &backup).unwrap();
+        let a = reopen(da.path(), 1);
+        assert_eq!(
+            a.last_restore_ms().unwrap(),
+            None,
+            "a clean reopen is not a restore"
+        );
+
+        // Life goes on: a one-time key is handed out, another DM is queued.
+        let otk_after_backup = claim(&a, &b);
+        a.send_text(&pb, "later".into()).await.unwrap();
+        let keystore_copy = a.check_epoch(None).unwrap().epoch;
+
+        // Restore the old database; the sidecar is newer than it.
+        drop(a);
+        std::fs::copy(&backup, &db).unwrap();
+        for ext in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(da.path().join(format!("{DB_FILE}{ext}")));
+        }
+        let a = reopen(da.path(), 1);
+        assert!(a.last_restore_ms().unwrap().is_some(), "restore detected");
+        // Sessions are gone (the next send starts a new pre-key session) ...
+        assert!(!a.crypto.has_session(&pb).unwrap());
+        // ... the one-time key pool and the fallback key are new ...
+        assert_eq!(a.crypto.pool_size().unwrap(), 0);
+        assert_ne!(a.crypto.fallback_key().unwrap(), fallback_before);
+        assert_ne!(claim(&a, &b), otk_after_backup);
+        // ... and sequence numbers jumped past anything the old copy sent.
+        let rows = a.store.outbox_for(&pb).unwrap();
+        assert_eq!(rows.len(), 1);
+        let s1 = rows[0].meta.seq.unwrap();
+        assert!(s1 > SEQ_RESTORE_GAP);
+        assert_eq!(a.store.message_meta(&m1).unwrap().unwrap().seq, Some(s1));
+        let m3 = a.send_text(&pb, "new".into()).await.unwrap();
+        assert_eq!(
+            a.store.message_meta(&m3).unwrap().unwrap().seq,
+            Some(s1 + 1)
+        );
+        let c = a.peer_id().to_base58(); // a stream never used before also jumps
+        assert!(a.store.seq_next(&dm_out_stream(&c)).unwrap() > SEQ_RESTORE_GAP);
+        // A new epoch. The keystore copy from before is from an epoch this
+        // database moved past, so it doesn't trigger again.
+        let st = a.check_epoch(Some(&keystore_copy)).unwrap();
+        assert!(!st.restored);
+        assert_ne!(st.epoch.split('.').next(), keystore_copy.split('.').next());
+
+        // A keystore copy that is ahead of the database is a restore.
+        let cur: Epoch = st.epoch.parse().unwrap();
+        let ahead = Epoch {
+            id: cur.id.clone(),
+            n: cur.n + 5,
+        }
+        .to_string();
+        let st2 = a.check_epoch(Some(&ahead)).unwrap();
+        assert!(st2.restored);
+        assert_ne!(st2.epoch, st.epoch);
+
+        // A database copied in without its sidecar is a restore.
+        let e = a.epoch().unwrap();
+        drop(a);
+        std::fs::remove_file(da.path().join(epoch::EPOCH_FILE)).unwrap();
+        let a = reopen(da.path(), 1);
+        assert_ne!(a.epoch().unwrap(), e);
+        assert!(epoch::read_sidecar(da.path()).is_some());
+        assert!(a.check_epoch(Some("zz.0")).unwrap().restored, "unknown id");
     }
 
     #[tokio::test]

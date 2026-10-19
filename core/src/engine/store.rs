@@ -714,6 +714,11 @@ impl Store {
         Ok(())
     }
 
+    /// Drop every Olm session (after a restore).
+    pub fn delete_all_sessions(&self) -> Result<usize> {
+        Ok(self.c().execute("DELETE FROM olm_sessions", [])?)
+    }
+
     pub fn delete_sessions(&self, peer_id: &str) -> Result<()> {
         self.c()
             .execute("DELETE FROM olm_sessions WHERE peer_id = ?1", [peer_id])?;

@@ -355,3 +355,102 @@ async fn tor_mode_is_socks_only() {
     assert_eq!(greet, [5, 1, 0], "SOCKS5 greeting");
     a.stop_network().await.unwrap();
 }
+
+/// A device whose whole data dir (database and epoch sidecar) is rolled back
+/// can't tell by itself. Its peer can: it has already seen that `seq` with
+/// other content. The peer rejects it as `Replayed`; the sender drops its
+/// sessions, jumps its sequence numbers and resends on a fresh session.
+#[cfg(not(feature = "tor"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rolled_back_sender_is_caught_by_its_peer_and_recovers() {
+    init_tracing();
+    let a_dir = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let start = |key: u8| {
+        let dir = a_dir.path().to_path_buf();
+        async move {
+            let hub = EventHub::new();
+            let rx = hub.subscribe();
+            let core = Core::open(&dir, &[key; 32], cfg(), hub).unwrap();
+            core.start_network().await.unwrap();
+            (core, rx)
+        }
+    };
+    let stop = |core: Arc<Core>| async move {
+        core.stop_network().await.unwrap();
+        for _ in 0..250 {
+            if Arc::strong_count(&core) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(core);
+    };
+    let copy_dir = |from: &std::path::Path, to: &std::path::Path| {
+        for e in std::fs::read_dir(to).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_file() {
+                std::fs::remove_file(p).unwrap();
+            }
+        }
+        for e in std::fs::read_dir(from).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_file() {
+                std::fs::copy(&p, to.join(p.file_name().unwrap())).unwrap();
+            }
+        }
+    };
+
+    let mut b = node(6, "B").await;
+    let qb = b.core.self_info();
+    let (a, _rx) = start(5).await;
+    let qa = a.self_info();
+    let card = |q: &SelfInfo| umbra_core::engine::qr::parse_qr(&q.qr_payload).unwrap();
+    a.add_contact(card(&qb), false).await.unwrap();
+    b.core.add_contact(card(&qa), false).await.unwrap();
+
+    // Back up A's whole data dir (database and sidecar) while it is closed.
+    stop(a).await;
+    copy_dir(a_dir.path(), backup.path());
+
+    let (a, _rx) = start(5).await;
+    a.send_text(&qb.peer_id, "first".into()).await.unwrap();
+    wait_for(
+        &mut b,
+        |e| matches!(e, CoreEvent::MessageReceived { message } if message.body == "first"),
+    )
+    .await;
+
+    // Roll A back to the backup, which never sent "first".
+    stop(a).await;
+    copy_dir(backup.path(), a_dir.path());
+    let (a, mut arx) = start(5).await;
+    assert_eq!(a.last_restore_ms().unwrap(), None, "undetectable locally");
+    let id = a.send_text(&qb.peer_id, "second".into()).await.unwrap();
+    wait_for(
+        &mut b,
+        |e| matches!(e, CoreEvent::MessageReceived { message } if message.body == "second"),
+    )
+    .await;
+    timeout(T, async {
+        loop {
+            if let Some(CoreEvent::MessageStatus {
+                id: i,
+                status: DeliveryStatus::Delivered,
+                ..
+            }) = arx.recv().await
+            {
+                if i == id {
+                    return;
+                }
+            }
+        }
+    })
+    .await
+    .expect("delivered after the jump");
+    // B shows each message once.
+    let msgs = b.core.list_messages(&qa.peer_id, None, 10).unwrap();
+    assert_eq!(msgs.len(), 2);
+    a.stop_network().await.unwrap();
+    b.core.stop_network().await.unwrap();
+}

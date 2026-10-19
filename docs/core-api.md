@@ -320,6 +320,55 @@ enum SeqVerdict { Fresh, Duplicate, Fork, Stale }
 * **Olm** needs nothing more: a replayed Olm message fails to decrypt. Call
   signals carry no `seq`; `call_id` dedupe in `calls/` covers the rest.
 
+### Restore from an old copy (Phase 0, [message-protection.md](message-protection.md#anti-rollback))
+
+```rust
+fn epoch(&self) -> Result<String>;                                  // "<id>.<n>"
+fn check_epoch(&self, witness: Option<&str>) -> Result<EpochStatus>;
+fn recover_from_restore(&self) -> Result<String>;                   // the "restore flag"
+fn last_restore_ms(&self) -> Result<Option<i64>>;
+struct EpochStatus { epoch: String, restored: bool }
+```
+
+Keys are never reused after a restore. The database carries an **epoch**
+`(id, n)` (`meta.epoch`). `n` goes up before every Olm encrypt and before
+every one-time key is handed out, and the same value is written atomically
+to a sidecar file `<data_dir>/epoch` outside SQLCipher (database first, so a
+crash in between never looks like a restore). A restore is detected when a
+witness is ahead of the database (same id with a larger `n`, or an id this
+database has never had):
+
+* **at open**, from the sidecar. A database that has an epoch but no sidecar
+  is treated as restored too, so the app should exclude `epoch` from backups
+  and device transfers (Android `dataExtractionRules`; backups are meant to
+  be off anyway);
+* **from the app**, with `check_epoch(Some(copy))`, where `copy` is the
+  epoch the app keeps in the OS keystore item next to `db_key` (from an
+  earlier `check_epoch`). Call it after `init` and store the returned
+  `epoch` back. This also catches a restore of the whole data directory, as
+  long as the keystore wasn't rolled back too.
+
+On detection (or an explicit `recover_from_restore()`), core:
+
+1. drops **every Olm session**, so the next message to each peer starts a
+   fresh pre-key session;
+2. forgets the published **one-time key** pool (keys from the old copy may
+   have been handed out since) and **rotates the fallback key**; the next
+   key claim publishes a fresh batch;
+3. **jumps every outgoing sequence number** forward by `SEQ_RESTORE_GAP`
+   (2^20), including a floor for streams it doesn't know yet, and renumbers
+   queued DMs;
+4. records a **new epoch** (new id, the old one kept in `meta.epoch_history`
+   so an old keystore copy doesn't trigger again) and `meta.restored_at`.
+
+A rollback that no witness catches (the data dir *and* keystore restored) is
+still caught by peers: they reject our reused `seq` as `Replayed`, and we
+re-key and jump for that peer (see *Anti-replay*). Not in Phase 0: Megolm
+outbound rotation (no Megolm yet), the `Heads` exchange after `Hello`
+(Phase 1), bumping the epoch on expiry runs, and the FFI / UI side (these
+calls are engine-level; the app can't call `check_epoch` or show "This
+device's data was restored from an older copy" until they're exposed).
+
 ## Messaging
 
 ```rust

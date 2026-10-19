@@ -1,5 +1,6 @@
 pub mod core;
 pub mod crypto;
+pub mod epoch;
 pub mod events;
 pub mod limits;
 pub mod net;
