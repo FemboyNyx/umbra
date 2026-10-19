@@ -14,6 +14,16 @@ default = []
 # Embed arti-client. Without this feature the crate is a cheap stub (multiaddr
 # helpers + SOCKS design) so the workspace stays lean on mobile / CI without Tor.
 tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util"]
+# EXPERIMENTAL: host an inbound v3 onion service (arti `onion-service-service`).
+# Off by default; implies `tor`.
+tor-listen = [
+    "tor",
+    "arti-client/onion-service-service",
+    "dep:tor-hsservice",
+    "dep:tor-cell",
+    "dep:tor-proto",
+    "dep:safelog",
+]
 
 [dependencies]
 futures = "0.3"
@@ -26,6 +36,12 @@ tracing = "0.1"
 arti-client = { version = "0.35", optional = true, default-features = false, features = ["tokio", "rustls", "compression", "onion-service-client", "static-sqlite"] }
 tor-rtcompat = { version = "0.35", optional = true, default-features = false, features = ["tokio", "rustls"] }
 tokio-util = { version = "0.7", optional = true, features = ["compat"] }
+# Only for `tor-listen` (EXPERIMENTAL): rend/stream request handling, BEGIN/
+# CONNECTED/END cells, and redaction-aware HsId formatting. Same 0.35 line as arti.
+tor-hsservice = { version = "0.35", optional = true, default-features = false }
+tor-cell = { version = "0.35", optional = true, default-features = false }
+tor-proto = { version = "0.35", optional = true, default-features = false, features = ["hs-service"] }
+safelog = { version = "0.6", optional = true, default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

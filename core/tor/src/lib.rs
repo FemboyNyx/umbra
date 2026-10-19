@@ -6,8 +6,11 @@
 //! | --- | --- |
 //! | default | [`multiaddr_to_target`], [`socks`] (`TorMode`, [`SocksDest`]), [`TorConfig`] |
 //! | `--features tor` | plus [`TorTransport`]: dial-only [`libp2p::core::Transport`] via embedded arti |
+//! | `--features tor-listen` | **EXPERIMENTAL**: plus inbound v3 onion-service listening (`listen_on` with `/onion3`) |
 //!
-//! Listening as an onion service is **not** implemented yet; see `docs/tor.md`.
+//! Inbound onion listening is gated behind the off-by-default `tor-listen`
+//! feature because arti's onion-service hosting is experimental upstream; see
+//! the `listen` module and `docs/tor.md`.
 //!
 //! `libp2p-community-tor` was evaluated and **not** used: it pins arti ^0.24 and
 //! libp2p ^0.53 and has had no meaningful maintenance since late 2024. This crate
@@ -17,8 +20,14 @@ use libp2p::multiaddr::{Multiaddr, Protocol};
 use std::net::SocketAddr;
 
 pub mod config;
+#[cfg(feature = "tor-listen")]
+pub mod listen;
 pub mod socks;
 pub use config::TorConfig;
+#[cfg(feature = "tor-listen")]
+pub use config::DEFAULT_ONION_NICKNAME;
+#[cfg(feature = "tor-listen")]
+pub use listen::{onion_listen_addr, parse_onion_listen_addr, OnionListenRequest};
 pub use socks::{multiaddr_to_socks_dest, target_to_socks_dest, SocksDest, SocksProxy, TorMode};
 
 /// Where a multiaddr points, in a form Tor can dial.
@@ -45,6 +54,41 @@ pub enum TorError {
     #[cfg(feature = "tor")]
     #[error("arti: {0}")]
     Arti(#[from] arti_client::Error),
+    /// EXPERIMENTAL (`tor-listen`): nickname rejected by arti's `HsNickname` rules.
+    #[cfg(feature = "tor-listen")]
+    #[error("invalid onion service nickname: {0:?}")]
+    InvalidNickname(String),
+    /// EXPERIMENTAL (`tor-listen`): listening needs explicit state/cache dirs so
+    /// onion keys are only stored in the app-controlled keystore.
+    #[cfg(feature = "tor-listen")]
+    #[error("onion listening requires TorConfig with custom state_dir and cache_dir")]
+    ListenRequiresCustomDirs,
+    /// EXPERIMENTAL (`tor-listen`): an exact `/onion3` listen address did not
+    /// match this node's persisted onion identity.
+    #[cfg(feature = "tor-listen")]
+    #[error("listen address does not match this node's onion identity")]
+    OnionAddressMismatch,
+    /// EXPERIMENTAL (`tor-listen`): only one onion listener per transport (one
+    /// service per nickname; arti locks its state while it runs).
+    #[cfg(feature = "tor-listen")]
+    #[error("an onion service listener is already active on this transport")]
+    OnionListenerActive,
+    /// EXPERIMENTAL (`tor-listen`): the service's identity key is not in the keystore.
+    #[cfg(feature = "tor-listen")]
+    #[error("onion service identity key not found in keystore")]
+    OnionIdentityMissing,
+    /// EXPERIMENTAL (`tor-listen`): accepting an incoming onion stream failed.
+    /// Boxed: `ClientError` is large and would bloat every `Result<_, TorError>`.
+    #[cfg(feature = "tor-listen")]
+    #[error("onion service stream: {0}")]
+    OnionStream(Box<tor_hsservice::ClientError>),
+}
+
+#[cfg(feature = "tor-listen")]
+impl From<tor_hsservice::ClientError> for TorError {
+    fn from(e: tor_hsservice::ClientError) -> Self {
+        Self::OnionStream(Box::new(e))
+    }
 }
 
 /// Map a libp2p multiaddr to a Tor target.
