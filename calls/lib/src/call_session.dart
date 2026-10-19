@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -16,7 +17,7 @@ enum CallSessionState {
   failed,
 }
 
-/// Low-level WebRTC session for one 1:1 call.
+/// 1:1 WebRTC session. Flow: Ringing → Accept|Busy|Reject → Offer → Answer → ICE → Hangup.
 class CallSession {
   CallSession({
     required this.callId,
@@ -43,10 +44,8 @@ class CallSession {
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
-
   final localRenderer = RTCVideoRenderer();
   final remoteRenderer = RTCVideoRenderer();
-
   MediaStream? get localStream => _localStream;
   MediaStream? get remoteStream => _remoteStream;
 
@@ -60,21 +59,52 @@ class CallSession {
     _stateController.add(next);
   }
 
+  CallSignalMessage _msg(
+    SignalKind kind, {
+    String? reason,
+    String? sdp,
+    String? sdpType,
+    String? ice,
+    String? mid,
+    int? mLine,
+  }) =>
+      CallSignalMessage(
+        kind: kind,
+        callId: callId,
+        fromPeerId: localPeerId,
+        toPeerId: remotePeerId,
+        mediaMode: mediaMode,
+        reason: reason,
+        sdp: sdp,
+        sdpType: sdpType,
+        iceCandidate: ice,
+        iceSdpMid: mid,
+        iceSdpMLineIndex: mLine,
+      );
+
+  /// Core does not queue signals; unreachable peer → [CallSessionState.failed].
+  Future<void> _sendOrFail(CallSignalMessage message) async {
+    try {
+      final bytes = utf8.encode(message.toPayload());
+      if (bytes.length > 64 * 1024) {
+        _setState(CallSessionState.failed);
+        throw StateError('Call signal payload exceeds core 64 KiB limit');
+      }
+      await transport.send(message);
+    } catch (_) {
+      if (state != CallSessionState.ended && state != CallSessionState.failed) {
+        _setState(CallSessionState.failed);
+      }
+      rethrow;
+    }
+  }
+
   Future<void> startAsCaller() async {
     _setState(CallSessionState.creating);
-    await _ensurePeerConnection();
-    await _attachLocalMedia();
-    await transport.send(CallSignalMessage(
-      type: CallSignalType.invite,
-      callId: callId,
-      fromPeerId: localPeerId,
-      toPeerId: remotePeerId,
-      mediaMode: mediaMode,
-    ));
+    await _sendOrFail(_msg(SignalKind.ringing));
     _setState(CallSessionState.ringingOut);
   }
 
-  /// Callee: ring UI only; media starts on [accept].
   Future<void> notifyIncoming() async {
     _setState(CallSessionState.ringingIn);
   }
@@ -84,59 +114,46 @@ class CallSession {
     _setState(CallSessionState.creating);
     await _ensurePeerConnection();
     await _attachLocalMedia();
-    await transport.send(CallSignalMessage(
-      type: CallSignalType.accept,
-      callId: callId,
-      fromPeerId: localPeerId,
-      toPeerId: remotePeerId,
-      mediaMode: mediaMode,
-    ));
+    await _sendOrFail(_msg(SignalKind.accept));
     _setState(CallSessionState.connecting);
   }
 
   Future<void> reject({String? reason}) async {
-    await transport.send(CallSignalMessage(
-      type: CallSignalType.reject,
-      callId: callId,
-      fromPeerId: localPeerId,
-      toPeerId: remotePeerId,
-      mediaMode: mediaMode,
-      reason: reason,
-    ));
+    await _sendOrFail(_msg(SignalKind.reject, reason: reason));
+    await dispose(failed: false);
+  }
+
+  Future<void> busy({String? reason}) async {
+    await _sendOrFail(_msg(SignalKind.busy, reason: reason ?? 'busy'));
     await dispose(failed: false);
   }
 
   Future<void> hangup({String? reason}) async {
-    await transport.send(CallSignalMessage(
-      type: CallSignalType.hangup,
-      callId: callId,
-      fromPeerId: localPeerId,
-      toPeerId: remotePeerId,
-      mediaMode: mediaMode,
-      reason: reason,
-    ));
+    await _sendOrFail(_msg(SignalKind.hangup, reason: reason));
     await dispose(failed: false);
   }
 
   Future<void> onRemoteSignal(CallSignalMessage msg) async {
     if (msg.callId != callId) return;
-    switch (msg.type) {
-      case CallSignalType.accept:
-        if (isCaller) {
+    switch (msg.kind) {
+      case SignalKind.accept:
+        if (isCaller && state == CallSessionState.ringingOut) {
           _setState(CallSessionState.connecting);
+          await _ensurePeerConnection();
+          await _attachLocalMedia();
           await _createAndSendOffer();
         }
-      case CallSignalType.reject:
-      case CallSignalType.hangup:
+      case SignalKind.busy:
+      case SignalKind.reject:
+      case SignalKind.hangup:
         await dispose(failed: false);
-      case CallSignalType.sdpOffer:
+      case SignalKind.offer:
         await _handleRemoteOffer(msg);
-      case CallSignalType.sdpAnswer:
+      case SignalKind.answer:
         await _handleRemoteAnswer(msg);
-      case CallSignalType.iceCandidate:
+      case SignalKind.iceCandidate:
         await _handleRemoteIce(msg);
-      case CallSignalType.invite:
-        // Handled by controller before session create.
+      case SignalKind.ringing:
         break;
     }
   }
@@ -158,16 +175,16 @@ class CallSession {
     _pc = await createPeerConnection(iceConfig.toPeerConnectionConfig());
     _pc!.onIceCandidate = (RTCIceCandidate c) async {
       if (c.candidate == null || c.candidate!.isEmpty) return;
-      await transport.send(CallSignalMessage(
-        type: CallSignalType.iceCandidate,
-        callId: callId,
-        fromPeerId: localPeerId,
-        toPeerId: remotePeerId,
-        mediaMode: mediaMode,
-        iceCandidate: c.candidate,
-        iceSdpMid: c.sdpMid,
-        iceSdpMLineIndex: c.sdpMLineIndex,
-      ));
+      try {
+        await _sendOrFail(_msg(
+          SignalKind.iceCandidate,
+          ice: c.candidate,
+          mid: c.sdpMid,
+          mLine: c.sdpMLineIndex,
+        ));
+      } catch (_) {
+        // Already marked failed in _sendOrFail.
+      }
     };
     _pc!.onTrack = (RTCTrackEvent event) {
       if (event.streams.isNotEmpty) {
@@ -188,9 +205,7 @@ class CallSession {
     final constraints = <String, dynamic>{
       'audio': true,
       'video': mediaMode == CallMediaMode.audioVideo
-          ? {
-              'facingMode': 'user',
-            }
+          ? {'facingMode': 'user'}
           : false,
     };
     _localStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -203,15 +218,7 @@ class CallSession {
   Future<void> _createAndSendOffer() async {
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
-    await transport.send(CallSignalMessage(
-      type: CallSignalType.sdpOffer,
-      callId: callId,
-      fromPeerId: localPeerId,
-      toPeerId: remotePeerId,
-      mediaMode: mediaMode,
-      sdp: offer.sdp,
-      sdpType: offer.type,
-    ));
+    await _sendOrFail(_msg(SignalKind.offer, sdp: offer.sdp, sdpType: offer.type));
   }
 
   Future<void> _handleRemoteOffer(CallSignalMessage msg) async {
@@ -222,15 +229,7 @@ class CallSession {
     );
     final answer = await _pc!.createAnswer();
     await _pc!.setLocalDescription(answer);
-    await transport.send(CallSignalMessage(
-      type: CallSignalType.sdpAnswer,
-      callId: callId,
-      fromPeerId: localPeerId,
-      toPeerId: remotePeerId,
-      mediaMode: mediaMode,
-      sdp: answer.sdp,
-      sdpType: answer.type,
-    ));
+    await _sendOrFail(_msg(SignalKind.answer, sdp: answer.sdp, sdpType: answer.type));
     _setState(CallSessionState.connecting);
   }
 

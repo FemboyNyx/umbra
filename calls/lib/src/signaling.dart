@@ -1,58 +1,73 @@
-/// Call signaling messages carried by core's encrypted channel.
+/// Call signaling via core `send_signal` / `CoreEvent::Signal`.
 ///
-/// Wire format: a JSON object with `type` and payload fields below.
-/// Core should treat these as opaque application messages (e.g. `app/call/v1`).
+/// SignalKind: Ringing | Accept | Busy | Reject | Offer | Answer | IceCandidate | Hangup
 library;
 
-/// Message type discriminator for call signaling.
-enum CallSignalType {
-  invite,
+enum SignalKind {
+  ringing,
   accept,
+  busy,
   reject,
-  hangup,
-  sdpOffer,
-  sdpAnswer,
+  offer,
+  answer,
   iceCandidate,
+  hangup,
 }
 
-extension CallSignalTypeWire on CallSignalType {
+extension SignalKindWire on SignalKind {
   String get wire {
     switch (this) {
-      case CallSignalType.invite:
-        return 'call.invite';
-      case CallSignalType.accept:
-        return 'call.accept';
-      case CallSignalType.reject:
-        return 'call.reject';
-      case CallSignalType.hangup:
-        return 'call.hangup';
-      case CallSignalType.sdpOffer:
-        return 'call.sdp.offer';
-      case CallSignalType.sdpAnswer:
-        return 'call.sdp.answer';
-      case CallSignalType.iceCandidate:
-        return 'call.ice';
+      case SignalKind.ringing:
+        return 'Ringing';
+      case SignalKind.accept:
+        return 'Accept';
+      case SignalKind.busy:
+        return 'Busy';
+      case SignalKind.reject:
+        return 'Reject';
+      case SignalKind.offer:
+        return 'Offer';
+      case SignalKind.answer:
+        return 'Answer';
+      case SignalKind.iceCandidate:
+        return 'IceCandidate';
+      case SignalKind.hangup:
+        return 'Hangup';
     }
   }
 
-  static CallSignalType? tryParse(String wire) {
-    for (final v in CallSignalType.values) {
-      if (v.wire == wire) return v;
+  static SignalKind? tryParse(String raw) {
+    for (final v in SignalKind.values) {
+      if (v.wire == raw || v.name.toLowerCase() == raw.toLowerCase()) {
+        return v;
+      }
     }
-    return null;
+    switch (raw) {
+      case 'call.invite':
+        return SignalKind.ringing;
+      case 'call.accept':
+        return SignalKind.accept;
+      case 'call.reject':
+        return SignalKind.reject;
+      case 'call.hangup':
+        return SignalKind.hangup;
+      case 'call.sdp.offer':
+        return SignalKind.offer;
+      case 'call.sdp.answer':
+        return SignalKind.answer;
+      case 'call.ice':
+        return SignalKind.iceCandidate;
+      default:
+        return null;
+    }
   }
 }
 
-/// Media mode requested for a call.
-enum CallMediaMode {
-  audioOnly,
-  audioVideo,
-}
+enum CallMediaMode { audioOnly, audioVideo }
 
-/// A signaling envelope. Serialize with [toJson] / parse with [CallSignalMessage.parse].
 class CallSignalMessage {
   CallSignalMessage({
-    required this.type,
+    required this.kind,
     required this.callId,
     required this.fromPeerId,
     required this.toPeerId,
@@ -65,28 +80,19 @@ class CallSignalMessage {
     this.reason,
   });
 
-  final CallSignalType type;
+  final SignalKind kind;
   final String callId;
   final String fromPeerId;
   final String toPeerId;
   final CallMediaMode mediaMode;
-
-  /// SDP body for offer/answer.
   final String? sdp;
-  final String? sdpType; // "offer" | "answer"
-
+  final String? sdpType;
   final String? iceCandidate;
   final String? iceSdpMid;
   final int? iceSdpMLineIndex;
-
-  /// Optional human-readable reject/hangup reason.
   final String? reason;
 
-  Map<String, Object?> toJson() => {
-        'type': type.wire,
-        'callId': callId,
-        'from': fromPeerId,
-        'to': toPeerId,
+  Map<String, Object?> payloadMap() => {
         'media': mediaMode == CallMediaMode.audioVideo ? 'av' : 'audio',
         if (sdp != null) 'sdp': sdp,
         if (sdpType != null) 'sdpType': sdpType,
@@ -96,27 +102,52 @@ class CallSignalMessage {
         if (reason != null) 'reason': reason,
       };
 
+  String toPayload() {
+    final map = payloadMap();
+    final parts = <String>[];
+    for (final e in map.entries) {
+      final v = e.value;
+      if (v is String) {
+        parts.add('"${e.key}":"${_escape(v)}"');
+      } else if (v is num || v is bool) {
+        parts.add('"${e.key}":$v');
+      }
+    }
+    return '{${parts.join(',')}}';
+  }
+
+  static String _escape(String s) => s
+      .replaceAll(r'\', r'\\')
+      .replaceAll('"', r'\"')
+      .replaceAll('\n', r'\n')
+      .replaceAll('\r', r'\r');
+
+  Map<String, Object?> toJson() => {
+        'kind': kind.wire,
+        'type': kind.wire,
+        'callId': callId,
+        'from': fromPeerId,
+        'to': toPeerId,
+        ...payloadMap(),
+      };
+
   static CallSignalMessage? parse(Map<String, Object?> json) {
-    final typeRaw = json['type'];
-    if (typeRaw is! String) return null;
-    final type = CallSignalTypeWire.tryParse(typeRaw);
-    if (type == null) return null;
-
+    final typeRaw = (json['kind'] ?? json['type']) as String?;
+    if (typeRaw == null) return null;
+    final kind = SignalKindWire.tryParse(typeRaw);
+    if (kind == null) return null;
     final callId = json['callId'];
-    final from = json['from'];
-    final to = json['to'];
-    if (callId is! String || from is! String || to is! String) return null;
-
-    final mediaRaw = json['media'];
-    final media = mediaRaw == 'av'
+    final from = json['from'] ?? json['peer_id'] ?? json['fromPeerId'];
+    final to = json['to'] ?? json['toPeerId'];
+    if (callId is! String || from is! String) return null;
+    final media = json['media'] == 'av'
         ? CallMediaMode.audioVideo
         : CallMediaMode.audioOnly;
-
     return CallSignalMessage(
-      type: type,
+      kind: kind,
       callId: callId,
       fromPeerId: from,
-      toPeerId: to,
+      toPeerId: to is String ? to : '',
       mediaMode: media,
       sdp: json['sdp'] as String?,
       sdpType: json['sdpType'] as String?,
@@ -126,10 +157,43 @@ class CallSignalMessage {
       reason: json['reason'] as String?,
     );
   }
+
+  static CallSignalMessage? fromCore({
+    required String peerId,
+    required String localPeerId,
+    required String callId,
+    required String kindWire,
+    Map<String, Object?> payload = const {},
+  }) {
+    return parse({
+      'kind': kindWire,
+      'callId': callId,
+      'from': peerId,
+      'to': localPeerId,
+      ...payload,
+    });
+  }
 }
 
-/// Sink the app/core bridge implements so [CallController] can send signals.
 abstract class CallSignalTransport {
-  /// Deliver [message] to [message.toPeerId] over core's E2E channel.
   Future<void> send(CallSignalMessage message);
+}
+
+/// Adapts core `send_signal(peer_id, call_id, kind, payload)`.
+class CoreSignalTransport implements CallSignalTransport {
+  CoreSignalTransport(this._send);
+  final Future<void> Function({
+    required String peerId,
+    required String callId,
+    required SignalKind kind,
+    required String payload,
+  }) _send;
+
+  @override
+  Future<void> send(CallSignalMessage message) => _send(
+        peerId: message.toPeerId,
+        callId: message.callId,
+        kind: message.kind,
+        payload: message.toPayload(),
+      );
 }
