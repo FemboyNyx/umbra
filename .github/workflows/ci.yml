@@ -151,19 +151,54 @@ jobs:
       - name: Build Windows
         working-directory: app
         run: flutter build windows --release
-      - name: Zip release
-        working-directory: app
+      - name: Package zip
         shell: pwsh
+        env:
+          UMBRA_VERSION: ${{ github.sha }}
         run: |
-          Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath umbra-windows.zip
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          ./packaging/windows/build-zip.ps1 `
+            -BundleDir app/build/windows/x64/runner/Release `
+            -OutFile dist/umbra-windows-x64.zip `
+            -Version $env:UMBRA_VERSION.Substring(0,7)
+      - name: Optional MSIX
+        shell: pwsh
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_BASE64 -or -not $env:WINDOWS_CERT_PASSWORD) {
+            Write-Host "WINDOWS_CERT_* secrets missing; shipping zip only."
+            exit 0
+          }
+          if (-not (Test-Path app/pubspec.yaml)) { exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "umbra.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          Push-Location app
+          # Requires msix pub package + msix_config (Copilot). Skip cleanly if absent.
+          $pubspec = Get-Content pubspec.yaml -Raw
+          if ($pubspec -notmatch '(?m)^\s*msix:') {
+            Write-Host "msix package not configured in pubspec yet; shipping zip only."
+            Pop-Location
+            exit 0
+          }
+          flutter pub get
+          $env:MSIX_CERTIFICATE_PATH = $pfx
+          $env:MSIX_CERTIFICATE_PASSWORD = $env:WINDOWS_CERT_PASSWORD
+          flutter pub run msix:create
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item app/build/windows/x64/runner/Release/*.msix dist/ -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@v4
         with:
-          name: umbra-windows-zip
-          path: app/umbra-windows.zip
+          name: umbra-windows
+          path: |
+            dist/*.zip
+            dist/*.msix
           if-no-files-found: error
 
   build-linux:
-    name: Build Linux tar.gz
+    name: Build Linux tar.gz / AppImage
     needs: detect
     if: needs.detect.outputs.has_app == 'true'
     runs-on: ubuntu-latest
@@ -172,7 +207,13 @@ jobs:
       - name: Install Linux build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev fuse libfuse2
+      - name: Install appimagetool
+        run: |
+          curl -fsSL -o /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -183,14 +224,24 @@ jobs:
       - name: Build Linux
         working-directory: app
         run: flutter build linux --release
-      - name: Package tar.gz
-        working-directory: app
+      - name: Package tar.gz + AppImage
+        env:
+          UMBRA_VERSION: ${{ github.sha }}
+          DEST_DIR: ${{ github.workspace }}/dist
         run: |
-          tar -C build/linux/x64/release/bundle -czf umbra-linux.tar.gz .
+          set -euo pipefail
+          mkdir -p dist
+          VER="${UMBRA_VERSION:0:7}"
+          export UMBRA_VERSION="$VER"
+          BUNDLE=app/build/linux/x64/release/bundle
+          packaging/linux/build-tarball.sh "$BUNDLE" "dist/umbra-${VER}-linux-x64.tar.gz"
+          packaging/linux/build-appimage.sh "$BUNDLE" "dist/Umbra-${VER}-x86_64.AppImage"
       - uses: actions/upload-artifact@v4
         with:
-          name: umbra-linux-targz
-          path: app/umbra-linux.tar.gz
+          name: umbra-linux
+          path: |
+            dist/*.tar.gz
+            dist/*.AppImage
           if-no-files-found: error
 
   ci-gate:
