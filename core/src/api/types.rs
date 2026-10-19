@@ -18,9 +18,11 @@ pub struct CoreConfig {
     pub relay_addrs: Vec<String>,
     /// Enable LAN discovery via mDNS.
     pub enable_mdns: bool,
-    /// SOCKS5 proxy for Tor (e.g. `127.0.0.1:9050`). Not implemented yet:
-    /// `start_network` refuses to run when this is set, so traffic never
-    /// silently bypasses Tor.
+    /// SOCKS5 proxy for Tor as `ip:port` (e.g. `127.0.0.1:9050` for system
+    /// tor, Orbot on Android). When set, the swarm is **Tor-only**: dials go
+    /// through the proxy, no clearnet TCP/QUIC, no local listening, no mDNS,
+    /// no DCUtR; inbound only via `relay_addrs` circuits. Calls (WebRTC) are
+    /// not routed through Tor.
     pub tor_socks: Option<String>,
     /// ADDITION: multiaddrs to listen on. Empty = defaults
     /// (`/ip4/0.0.0.0/tcp/0`, `/ip4/0.0.0.0/udp/0/quic-v1` and IPv6 equivalents).
