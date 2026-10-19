@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:flutter/services.dart';
 
 /// 32-byte SQLCipher key plus the backend that stored it.

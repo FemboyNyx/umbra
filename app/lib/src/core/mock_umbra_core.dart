@@ -64,7 +64,6 @@ class MockUmbraCore implements UmbraCore {
   );
 
   final _rng = Random();
-  var _seq = 0;
   var _lastTs = 0;
   String? _dataDir;
   SelfInfo? _self;
@@ -425,7 +424,6 @@ class MockUmbraCore implements UmbraCore {
   }
 
   String _uuid() {
-    _seq++;
     final bytes = List<int>.generate(16, (_) => _rng.nextInt(256));
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;

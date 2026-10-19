@@ -15,6 +15,8 @@ analyzer:
     - android/**
     - windows/**
     - linux/**
+    # Separate Dart package. Cargokit runs `pub get` inside it at native-build time.
+    - rust_builder/cargokit/build_tool/**
 
 linter:
   # The lint rules applied to this project can be customized in the
