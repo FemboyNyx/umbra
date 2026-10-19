@@ -38,6 +38,12 @@ In Tor mode the call stack uses `setTorMode(true)`. Calls stay relay-only and ar
 
 `start_network` failures are shown as "couldn't start network". The raw error, which can include listen addresses, is debug-only.
 
+## Message requests
+
+A DM from a co-member who is not a contact stays out of the inbox (`docs/servers.md`). The contacts screen shows one collapsed row, "Message requests", with "1 request" or "N requests". That row does not show the sender or the text, and it is not an unread badge. Opening it lists each request with the server it came from. Accept adds the sender as a contact with `verified: false` and moves the text into the chat, still unread, so no read receipt is sent. Not now drops it with no contact and no receipt.
+
+Phase 0 core does not store these. A co-member `Text` is `Rejected(NotAContact)` and raises `ContactRequest` (`docs/core-api.md`). `list_message_requests` is not in the FFI. The real backend returns an empty list and refuses accept and dismiss with "message requests are not in the core FFI yet". The mock implements the list. Nothing is seeded on launch.
+
 ## Codegen
 
 Bindings are already generated under `lib/src/rust/` and `core/src/frb_generated.rs`. Regenerate with codegen **2.13.0** after the Rust API changes:

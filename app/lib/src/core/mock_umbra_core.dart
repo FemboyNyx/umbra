@@ -79,6 +79,10 @@ class MockUmbraCore implements UmbraCore {
   String _fpDigits = '';
   final List<Contact> _contacts = [];
   final List<Message> _messages = [];
+
+  /// Co-member DMs that are not contacts. Never mixed into [_messages]
+  /// until the user accepts.
+  final List<MessageRequest> _requests = [];
   NetworkInfo _network = const NetworkInfo();
   final Map<String, String> _pendingSafety = {};
   final Map<String, String> _rejectedKeys = {};
@@ -210,6 +214,7 @@ class MockUmbraCore implements UmbraCore {
     );
     _contacts.removeWhere((c) => c.peerId == contact.peerId);
     _contacts.add(contact);
+    _takeRequestsIntoInbox(contact.peerId);
     _syncOnlinePeers();
     _later(timing.onlineAfterAdd, ContactOnline(contact.peerId));
     return contact;
@@ -410,6 +415,94 @@ class MockUmbraCore implements UmbraCore {
       return matched.sublist(0, limit);
     }
     return matched;
+  }
+
+  @override
+  Future<List<MessageRequest>> listMessageRequests() async {
+    _requireInit();
+    final copy = List<MessageRequest>.of(_requests)
+      ..sort((a, b) => a.timestampMs.compareTo(b.timestampMs));
+    return List<MessageRequest>.unmodifiable(copy);
+  }
+
+  /// Stores a co-member DM apart from the inbox.
+  ///
+  /// Not called from [init]. Phase 0 core has no `list_message_requests`;
+  /// this is the mock for the behavior decided in `docs/servers.md`.
+  void presentMessageRequest({
+    required ContactCard card,
+    required String serverId,
+    required String serverName,
+    required String body,
+    String? id,
+  }) {
+    _requireInit();
+    if (serverId.trim().isEmpty || serverName.trim().isEmpty) {
+      throw const UmbraException('message request needs a server');
+    }
+    if (body.trim().isEmpty) {
+      throw const UmbraException('message is empty');
+    }
+    final request = MessageRequest(
+      id: (id == null || id.isEmpty) ? _uuid() : id,
+      peerId: card.peerId,
+      displayName: card.displayName?.trim() ?? '',
+      serverId: serverId.trim(),
+      serverName: serverName.trim(),
+      body: body,
+      timestampMs: _now(),
+      card: card,
+    );
+    _requests.removeWhere((item) => item.id == request.id);
+    _requests.add(request);
+    _emit(MessageRequestArrived(request));
+  }
+
+  @override
+  Future<void> acceptMessageRequest(String id) async {
+    _requireInit();
+    final request = _requestById(id);
+    // verified stays false. The text moves into the inbox unread, so this
+    // does not send a read receipt.
+    await addContact(request.card, verified: false);
+  }
+
+  @override
+  Future<void> dismissMessageRequest(String id) async {
+    _requireInit();
+    final before = _requests.length;
+    _requests.removeWhere((item) => item.id == id);
+    if (_requests.length == before) {
+      throw const UmbraException('unknown message request');
+    }
+  }
+
+  MessageRequest _requestById(String id) {
+    for (final request in _requests) {
+      if (request.id == id) return request;
+    }
+    throw const UmbraException('unknown message request');
+  }
+
+  /// A new contact is no longer a request. Their waiting texts join the
+  /// inbox still unread.
+  void _takeRequestsIntoInbox(String peerId) {
+    final waiting = _requests.where((item) => item.peerId == peerId).toList();
+    _requests.removeWhere((item) => item.peerId == peerId);
+    for (final request in waiting) {
+      if (_messages.any((message) => message.id == request.id)) continue;
+      _messages.add(
+        Message(
+          id: request.id,
+          peerId: request.peerId,
+          outgoing: false,
+          body: request.body,
+          timestampMs: request.timestampMs,
+          status: DeliveryStatus.received,
+          read: false,
+        ),
+      );
+    }
   }
 
   @override

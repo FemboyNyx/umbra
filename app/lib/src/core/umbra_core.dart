@@ -58,6 +58,21 @@ abstract class UmbraCore {
 
   Future<void> markRead(String peerId, String upTo);
 
+  /// Co-member DMs that are not contacts yet. Not part of [listConversations].
+  ///
+  /// `list_message_requests` is specified in `docs/servers.md` and is not in
+  /// the Phase 0 FFI. [FrbUmbraCore] returns an empty list. [MockUmbraCore]
+  /// stores the decided behavior: apart from the inbox, no read receipt
+  /// until the user accepts.
+  Future<List<MessageRequest>> listMessageRequests();
+
+  /// Make the sender a contact (`verified: false`) and move the text into
+  /// the inbox. Must not mark it read.
+  Future<void> acceptMessageRequest(String id);
+
+  /// Drop the request. No contact is added and no read receipt is sent.
+  Future<void> dismissMessageRequest(String id);
+
   Future<void> sendSignal({
     required String peerId,
     required String callId,

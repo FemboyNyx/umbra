@@ -6,6 +6,7 @@ import '../state/umbra_controller.dart';
 import '../theme/umbra_theme.dart';
 import 'chat_screen.dart';
 import 'key_change_banner.dart';
+import 'message_requests_screen.dart';
 import 'settings_screen.dart';
 
 class ContactsScreen extends StatelessWidget {
@@ -98,6 +99,10 @@ class ContactsScreen extends StatelessWidget {
             for (final card in controller.pending)
               _RequestCard(controller: controller, card: card),
           ],
+          if (controller.messageRequests.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _MessageRequestRow(controller: controller),
+          ],
           const SizedBox(height: 16),
           Text('Chats', style: theme.textTheme.titleMedium),
           const SizedBox(height: 8),
@@ -179,6 +184,32 @@ class ContactsScreen extends StatelessWidget {
         context,
       ).showSnackBar(const SnackBar(content: Text('Contact added')));
     }
+  }
+}
+
+class _MessageRequestRow extends StatelessWidget {
+  const _MessageRequestRow({required this.controller});
+
+  final UmbraController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        title: const Text('Message requests'),
+        subtitle: Text(
+          messageRequestCountLabel(controller.messageRequests.length),
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => MessageRequestsScreen(controller: controller),
+            ),
+          );
+        },
+      ),
+    );
   }
 }
 
