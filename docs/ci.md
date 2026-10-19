@@ -201,9 +201,12 @@ Both `ci.yml` and `release.yml` decode the keystore to
 Used by the **Optional MSIX** step in CI and Release. The step exits cleanly
 (zip only) when either secret is missing **or** `app/pubspec.yaml` has no
 `msix:` dependency line. When both secrets and the pub config are present, the
-workflow writes a PFX under `$RUNNER_TEMP`, sets `MSIX_CERTIFICATE_PATH` /
-`MSIX_CERTIFICATE_PASSWORD`, runs `flutter pub run msix:create`, and copies
-`*.msix` into `dist/`.
+workflow writes a PFX under `$RUNNER_TEMP` and runs `dart run msix:create`
+with `--certificate-path` / `--certificate-password` passed explicitly (the
+`msix` package reads these only from `msix_config` or CLI flags, not from env
+vars), plus `--build-windows false` to reuse the release build,
+`--install-certificate false`, and `--output-path dist/`. The PFX is deleted
+afterwards, and the step fails if no `.msix` was produced.
 
 `*.pfx` is gitignored. `GITHUB_TOKEN` is provided automatically for
 `softprops/action-gh-release`.
