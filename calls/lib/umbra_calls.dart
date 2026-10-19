@@ -1,4 +1,4 @@
-library umbra_calls;
+library;
 
 export 'src/call_controller.dart';
 export 'src/call_privacy.dart';
