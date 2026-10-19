@@ -105,15 +105,18 @@ exec "${BIN}" "$@"
 APPRUN
 chmod 0755 "${APPDIR}/AppRun"
 
-install -m 0644 "${SCRIPT_DIR}/umbra.desktop" \
-  "${APPDIR}/usr/share/applications/umbra.desktop"
-# AppImage expects a desktop file at AppDir root with Icon= matching a root icon.
-cp "${APPDIR}/usr/share/applications/umbra.desktop" "${APPDIR}/umbra.desktop"
-# Point Icon to the AppDir-root icon name.
-sed -i 's|^Icon=.*|Icon=umbra|' "${APPDIR}/umbra.desktop"
+# The desktop-file ID must equal the app ID (GTK APPLICATION_ID / Wayland app_id)
+# so appimagetool finds usr/share/metainfo/<id>.metainfo.xml and the window maps
+# to its launcher. Icon=io.github.femboynyx.umbra matches the root icon below.
+DESKTOP_ID="io.github.femboynyx.umbra"
+install -m 0644 "${SCRIPT_DIR}/${DESKTOP_ID}.desktop" \
+  "${APPDIR}/usr/share/applications/${DESKTOP_ID}.desktop"
+cp "${APPDIR}/usr/share/applications/${DESKTOP_ID}.desktop" "${APPDIR}/${DESKTOP_ID}.desktop"
 
-install -m 0644 "${SCRIPT_DIR}/io.github.femboynyx.umbra.metainfo.xml" \
-  "${APPDIR}/usr/share/metainfo/io.github.femboynyx.umbra.metainfo.xml"
+# appimagetool only looks for the legacy <desktop-id>.appdata.xml name (still
+# valid AppStream); installing it under that name lets it validate and embed it.
+install -m 0644 "${SCRIPT_DIR}/${DESKTOP_ID}.metainfo.xml" \
+  "${APPDIR}/usr/share/metainfo/${DESKTOP_ID}.appdata.xml"
 
 ICON_SRC="${ICONS_DIR}/umbra-256.png"
 if [[ ! -f "${ICON_SRC}" ]]; then
@@ -122,9 +125,11 @@ if [[ ! -f "${ICON_SRC}" ]]; then
 fi
 install -m 0644 "${ICON_SRC}" \
   "${APPDIR}/usr/share/icons/hicolor/256x256/apps/io.github.femboynyx.umbra.png"
-install -m 0644 "${ICON_SRC}" "${APPDIR}/umbra.png"
+install -m 0644 "${ICON_SRC}" "${APPDIR}/${DESKTOP_ID}.png"
 
-if ! "${APPIMAGETOOL_BIN}" "${APPDIR}" "${OUT}"; then
+# appimagetool reads ARCH from the environment; without it, it guesses from
+# ELF files and fails on bundles it cannot inspect.
+if ! ARCH="${ARCH}" "${APPIMAGETOOL_BIN}" "${APPDIR}" "${OUT}"; then
   echo "error: appimagetool failed" >&2
   exit 3
 fi
