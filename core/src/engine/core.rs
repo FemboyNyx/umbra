@@ -122,8 +122,9 @@ impl Core {
             .unwrap_or_default()
     }
 
-    fn tor_mode(&self) -> bool {
-        self.cfg.tor_socks.is_some()
+    /// Tor-only when `tor_socks` is set or the crate is built with `tor`.
+    pub fn tor_mode(&self) -> bool {
+        self.cfg.tor_socks.is_some() || cfg!(feature = "tor")
     }
 
     /// Addresses we advertise (QR + Hello).
@@ -395,8 +396,11 @@ impl Core {
         let mode = match &self.cfg.tor_socks {
             Some(s) => TransportMode::TorSocks(
                 s.parse()
-                    .with_context(|| format!("tor_socks must be host:port, got {s}"))?,
+                    .with_context(|| format!("tor_socks must be ip:port, got {s}"))?,
             ),
+            #[cfg(feature = "tor")]
+            None => TransportMode::TorEmbedded,
+            #[cfg(not(feature = "tor"))]
             None => TransportMode::Clearnet {
                 mdns: self.cfg.enable_mdns,
             },
@@ -435,7 +439,7 @@ impl Core {
             relays: parse(&self.cfg.relay_addrs, "relay")?,
             known,
         };
-        let (handle, task) = net::spawn(self.clone(), self.id.keypair.clone(), cfg)?;
+        let (handle, task) = net::spawn(self.clone(), self.id.keypair.clone(), cfg).await?;
         {
             let mut ns = self.ns();
             ns.handle = Some(handle);

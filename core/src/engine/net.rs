@@ -2,7 +2,8 @@
 //!
 //! Clearnet mode: TCP + QUIC + DNS, Noise + Yamux, relay v2 client, DCUtR,
 //! optional mDNS.
-//! Tor mode (`tor_socks` set): SOCKS5 dial-only transport + relay client
+//! Tor mode (`tor_socks` set, or cargo feature `tor` = embedded arti):
+//! Tor dial-only transport + relay client
 //! ONLY (never `or()`-ed with clearnet), no DNS resolver, no mDNS, no DCUtR,
 //! identify hides listen addrs. Inbound reachability only via relay circuits.
 
@@ -94,9 +95,21 @@ pub enum TransportMode {
     },
     /// Tor via an external SOCKS5 proxy.
     TorSocks(SocketAddr),
+    /// Tor via embedded arti (`umbra-tor`, cargo feature `tor`).
+    #[cfg(feature = "tor")]
+    TorEmbedded,
 }
 
-pub fn build_swarm(keypair: identity::Keypair, mode: &TransportMode) -> Result<Swarm<Behaviour>> {
+impl TransportMode {
+    pub fn is_tor(&self) -> bool {
+        !matches!(self, TransportMode::Clearnet { .. })
+    }
+}
+
+pub async fn build_swarm(
+    keypair: identity::Keypair,
+    mode: &TransportMode,
+) -> Result<Swarm<Behaviour>> {
     let swarm_cfg = |c: libp2p::swarm::Config| c.with_idle_connection_timeout(IDLE_TIMEOUT);
     let swarm = match mode {
         TransportMode::Clearnet { mdns } => {
@@ -122,6 +135,28 @@ pub fn build_swarm(keypair: identity::Keypair, mode: &TransportMode) -> Result<S
                 .with_tokio()
                 .with_other_transport(|key| -> Result<_, BoxErr> {
                     Ok(SocksTransport::new(proxy)
+                        .upgrade(Version::V1)
+                        .authenticate(noise::Config::new(key)?)
+                        .multiplex(yamux::Config::default()))
+                })
+                .map_err(|e| anyhow!("tor transport: {e}"))?
+                .with_relay_client(noise::Config::new, yamux::Config::default)?
+                .with_behaviour(|key, relay| make_behaviour(key, relay, true, false))
+                .map_err(|e| anyhow!("behaviour: {e}"))?
+                .with_swarm_config(swarm_cfg)
+                .build()
+        }
+        #[cfg(feature = "tor")]
+        TransportMode::TorEmbedded => {
+            // TODO(tor): pass app-private state/cache dirs (Android) once
+            // umbra-tor exposes them; arti defaults to platform dirs.
+            let tor = umbra_tor::TorTransport::bootstrapped()
+                .await
+                .map_err(|e| anyhow!("tor bootstrap: {e}"))?;
+            libp2p::SwarmBuilder::with_existing_identity(keypair)
+                .with_tokio()
+                .with_other_transport(|key| -> Result<_, BoxErr> {
+                    Ok(tor
                         .upgrade(Version::V1)
                         .authenticate(noise::Config::new(key)?)
                         .multiplex(yamux::Config::default()))
@@ -205,13 +240,13 @@ fn split_p2p(addr: &Multiaddr) -> Option<PeerId> {
 
 /// Build the swarm, start listening and spawn the event loop. Returns once
 /// listeners are registered (addresses arrive asynchronously).
-pub fn spawn(
+pub async fn spawn(
     core: Arc<Core>,
     keypair: identity::Keypair,
     cfg: NetConfig,
 ) -> Result<(NetHandle, tokio::task::JoinHandle<()>)> {
-    let tor = matches!(cfg.mode, TransportMode::TorSocks(_));
-    let mut swarm = build_swarm(keypair, &cfg.mode)?;
+    let tor = cfg.mode.is_tor();
+    let mut swarm = build_swarm(keypair, &cfg.mode).await?;
 
     if !tor {
         for a in &cfg.listen {
