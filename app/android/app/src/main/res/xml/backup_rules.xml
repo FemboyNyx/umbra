@@ -1,8 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Full-backup rules for APIs that read fullBackupContent (before
+  dataExtractionRules). Same secrets as data_extraction_rules.xml: the
+  SQLCipher database, the epoch sidecar, and keystore fallback files.
+-->
 <full-backup-content>
-    <exclude domain="root" />
-    <exclude domain="file" />
-    <exclude domain="database" />
-    <exclude domain="sharedpref" />
-    <exclude domain="external" />
+    <exclude domain="root" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="file" path="umbra.db" />
+    <exclude domain="file" path="epoch" />
+    <exclude domain="file" path="epoch.tmp" />
+    <exclude domain="file" path="db_key.bin" />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="sharedpref" path="umbra_keystore.xml" />
+    <exclude domain="external" path="." />
 </full-backup-content>

@@ -206,6 +206,7 @@ class MockUmbraCore implements UmbraCore {
       safetyNumber: _safety(_fpDigits, theirs),
       addedAtMs: _now(),
       online: true,
+      signedCard: card.sig != null && card.sig!.isNotEmpty,
     );
     _contacts.removeWhere((c) => c.peerId == contact.peerId);
     _contacts.add(contact);

@@ -134,6 +134,7 @@ class Contact {
     required this.online,
     this.keyChanged = false,
     this.pendingIdentityKey,
+    this.signedCard = false,
   });
 
   final String peerId;
@@ -152,6 +153,10 @@ class Contact {
   /// The untrusted key, when [keyChanged] is set.
   final String? pendingIdentityKey;
 
+  /// Whether we hold a valid card v2 signature. Unsigned contacts are legacy
+  /// and stay usable.
+  final bool signedCard;
+
   String get label => displayName.trim().isEmpty ? peerId : displayName;
 
   Contact copyWith({
@@ -162,6 +167,7 @@ class Contact {
     String? safetyNumber,
     bool? keyChanged,
     Object? pendingIdentityKey = _keepPending,
+    bool? signedCard,
   }) {
     return Contact(
       peerId: peerId,
@@ -177,6 +183,7 @@ class Contact {
       pendingIdentityKey: identical(pendingIdentityKey, _keepPending)
           ? this.pendingIdentityKey
           : pendingIdentityKey as String?,
+      signedCard: signedCard ?? this.signedCard,
     );
   }
 }

@@ -94,6 +94,9 @@ bool RandomBytes(uint8_t* out) {
 }
 
 gchar* FilePath(const gchar* dir) {
+  // libsecret is preferred. This file is the fallback secret and sits in the
+  // data directory next to umbra.db and epoch. Linux has no allowBackup API;
+  // the file is mode 0600 and is not an OS keystore item.
   return g_build_filename(dir, "db_key.bin", nullptr);
 }
 

@@ -18,8 +18,12 @@ ContactCard parseUmbraQr(String payload) {
 
   final params = uri.queryParametersAll;
   final peer = _first(params['peer']);
-  final ik = _first(params['ik']);
-  final ed = _first(params['ed']);
+  // Form decoding turns a raw '+' into a space. Standard base64 never
+  // contains a space, so putting '+' back is safe. ik and ed stay standard
+  // base64 (vodozemac rejects url-safe). sig may be url-safe; core accepts
+  // that, and we do not rewrite '-' or '_'.
+  final ik = _plusFromSpace(_first(params['ik']));
+  final ed = _plusFromSpace(_first(params['ed']));
   if (peer == null || peer.isEmpty) {
     throw const UmbraException('missing peer');
   }
@@ -49,7 +53,7 @@ ContactCard parseUmbraQr(String payload) {
   }
 
   final name = _first(params['name']);
-  final sig = _first(params['sig']);
+  final sig = _plusFromSpace(_first(params['sig']));
   return ContactCard(
     peerId: peer,
     identityKey: ik,
@@ -83,6 +87,8 @@ String? _first(List<String>? values) {
   if (values == null || values.isEmpty) return null;
   return values.first;
 }
+
+String? _plusFromSpace(String? value) => value?.replaceAll(' ', '+');
 
 bool _looksLikeBase64(String value) {
   return RegExp(r'^[A-Za-z0-9+/]+={0,2}$').hasMatch(value);

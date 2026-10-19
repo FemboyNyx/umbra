@@ -53,6 +53,15 @@ class ContactDetailScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           SelectableText(contact.peerId, style: theme.textTheme.bodySmall),
+          if (!contact.signedCard) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Unsigned (legacy) card',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: UmbraColors.mist,
+              ),
+            ),
+          ],
           const SizedBox(height: 28),
           Text('Safety number', style: theme.textTheme.titleMedium),
           const SizedBox(height: 8),

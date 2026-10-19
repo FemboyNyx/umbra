@@ -8,11 +8,20 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!--
+      allowBackup=false turns cloud backup off. fullBackupOnly=true makes any
+      full-backup transport use backup_rules.xml instead of the legacy
+      key/value agent, which would copy SharedPreferences (the wrapped
+      SQLCipher key in umbra_keystore). Device-to-device transfer is disabled
+      separately in data_extraction_rules.xml. umbra.db, epoch, and keystore
+      fallback files are never backed up or transferred.
+    -->
     <application
         android:label="Umbra"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
+        android:fullBackupOnly="true"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules">
         <activity
