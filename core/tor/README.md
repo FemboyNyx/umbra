@@ -41,8 +41,8 @@ In `core/Cargo.toml` (already stubbed by Elite):
 ## Develop
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"   # rustup stable (>= 1.89)
-cd core/tor
+export PATH="$HOME/.cargo/bin:$PATH"   # rustup proxies honour core/rust-toolchain.toml
+cd core && rustup toolchain install && cd tor
 cargo fmt
 cargo test
 cargo test --features tor
@@ -50,6 +50,6 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features tor -- -D warnings
 ```
 
-MSRV: **1.89** (matches Elite / vodozemac 0.11). arti 0.35 shares rusqlite **0.37**;
+Toolchain is pinned only in `core/rust-toolchain.toml`; `rust-version` = 1.89 is just the floor (vodozemac 0.11). arti 0.35 shares rusqlite **0.37**;
 `tor` feature enables arti `static-sqlite` (no system libsqlite3)
 with `umbra_core` — bump them together.
