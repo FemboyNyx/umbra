@@ -1,0 +1,40 @@
+// Paste into app/android/app/build.gradle (Groovy) inside the android { } block
+// after reading key.properties. Copilot owns app/; this is a ready-to-apply snippet.
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace "io.github.femboynyx.umbra"
+    defaultConfig {
+        applicationId "io.github.femboynyx.umbra"
+        // …
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                keyAlias keystoreProperties["keyAlias"]
+                keyPassword keystoreProperties["keyPassword"]
+                storeFile keystoreProperties["storeFile"] ? file(keystoreProperties["storeFile"]) : null
+                storePassword keystoreProperties["storePassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.release
+            } else {
+                // Debug fallback — warn in CI; do not publish as official.
+                signingConfig signingConfigs.debug
+                println("WARNING: key.properties missing; using debug signing")
+            }
+            // minifyEnabled … left to Copilot
+        }
+    }
+}
