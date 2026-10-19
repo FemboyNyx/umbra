@@ -317,6 +317,27 @@ impl Crypto {
         }
     }
 
+    /// After a restore: drop every session, forget the published one-time
+    /// key pool (its keys may have been handed out after the backup was
+    /// taken), and rotate the fallback key. The next claim publishes a fresh
+    /// batch. Returns the number of sessions dropped.
+    pub fn reset_after_restore(&self) -> Result<usize> {
+        let mut acc = self.account.lock().expect("account poisoned");
+        let n = self.store.delete_all_sessions()?;
+        self.save_pool(&[])?;
+        acc.generate_fallback_key();
+        let k = acc
+            .fallback_key()
+            .into_values()
+            .next()
+            .ok_or_else(|| anyhow!("no fallback key"))?;
+        self.store
+            .meta_set(META_FALLBACK_KEY, k.to_base64().as_bytes())?;
+        acc.mark_keys_as_published();
+        self.save_account(&acc)?;
+        Ok(n)
+    }
+
     pub fn forget_sessions(&self, peer: &str) -> Result<()> {
         let _acc = self.account.lock().expect("account poisoned");
         self.store.delete_sessions(peer)

@@ -49,12 +49,14 @@ ContactCard parseUmbraQr(String payload) {
   }
 
   final name = _first(params['name']);
+  final sig = _first(params['sig']);
   return ContactCard(
     peerId: peer,
     identityKey: ik,
     ed25519Key: ed,
     addrs: addrs,
     displayName: (name == null || name.isEmpty) ? null : name,
+    sig: (sig == null || sig.isEmpty) ? null : sig,
   );
 }
 
@@ -70,6 +72,9 @@ String buildUmbraQr(ContactCard card) {
   final name = card.displayName?.trim();
   if (name != null && name.isNotEmpty) {
     query['name'] = name;
+  }
+  if (card.sig != null) {
+    query['sig'] = card.sig!;
   }
   return Uri(scheme: 'umbra', host: 'add', queryParameters: query).toString();
 }

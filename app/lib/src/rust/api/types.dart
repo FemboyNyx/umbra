@@ -35,6 +35,10 @@ class Contact {
   /// The untrusted new identity key, if `key_changed`.
   final String? pendingIdentityKey;
 
+  /// We hold a valid card v2 signature binding `identity_key` to the
+  /// device key. Legacy contacts become signed on their next `Hello`.
+  final bool signedCard;
+
   const Contact({
     required this.peerId,
     required this.displayName,
@@ -47,6 +51,7 @@ class Contact {
     required this.online,
     required this.keyChanged,
     this.pendingIdentityKey,
+    required this.signedCard,
   });
 
   @override
@@ -61,7 +66,8 @@ class Contact {
       addedAtMs.hashCode ^
       online.hashCode ^
       keyChanged.hashCode ^
-      pendingIdentityKey.hashCode;
+      pendingIdentityKey.hashCode ^
+      signedCard.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -78,7 +84,8 @@ class Contact {
           addedAtMs == other.addedAtMs &&
           online == other.online &&
           keyChanged == other.keyChanged &&
-          pendingIdentityKey == other.pendingIdentityKey;
+          pendingIdentityKey == other.pendingIdentityKey &&
+          signedCard == other.signedCard;
 }
 
 /// A contact as read from a QR code / link or received in a contact request.
@@ -95,12 +102,18 @@ class ContactCard {
   /// Optional display name (`name=` query param).
   final String? displayName;
 
+  /// Card v2: `ed25519_sign(ed, "umbra-card-v2" || PeerId bytes || ik)`,
+  /// unpadded base64. `None` on legacy (v1) cards. Core verifies it
+  /// wherever a card is accepted and rejects the card if it is invalid.
+  final String? sig;
+
   const ContactCard({
     required this.peerId,
     required this.identityKey,
     required this.ed25519Key,
     required this.addrs,
     this.displayName,
+    this.sig,
   });
 
   @override
@@ -109,7 +122,8 @@ class ContactCard {
       identityKey.hashCode ^
       ed25519Key.hashCode ^
       addrs.hashCode ^
-      displayName.hashCode;
+      displayName.hashCode ^
+      sig.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -120,7 +134,8 @@ class ContactCard {
           identityKey == other.identityKey &&
           ed25519Key == other.ed25519Key &&
           addrs == other.addrs &&
-          displayName == other.displayName;
+          displayName == other.displayName &&
+          sig == other.sig;
 }
 
 class ConversationSummary {
@@ -287,6 +302,9 @@ enum KeyChangeSource {
 
   /// A scanned QR / contact card passed to `add_contact`.
   contactCard,
+
+  /// A server roster entry (co-member card) for this peer.
+  roster,
 }
 
 class Message {

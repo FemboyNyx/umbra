@@ -80,16 +80,48 @@ fn reject_key_change(peer_id: String) -> Result<()>;        // ADDITION (securit
 QR payload:
 
 ```
-umbra://add?peer=<PeerId>&ik=<curve25519 b64>&ed=<ed25519 b64>&addr=<ma1>,<ma2>[&name=<display name>]
+umbra://add?peer=<PeerId>&ik=<curve25519 b64>&ed=<ed25519 b64>&addr=<ma1>,<ma2>[&name=<display name>][&sig=<b64>]
 ```
 
-`parse_qr` checks that `ed` derives `peer` and that `ik` is a valid
-Curve25519 key. Base64 is standard alphabet, unpadded (URL-encoded in the
+`parse_qr` checks that `ed` derives `peer`, that `ik` is a valid
+Curve25519 key and, if `sig` is present, that it is a valid card v2
+signature (see below). Base64 is standard alphabet, unpadded (URL-encoded in the
 query). At most 6 addresses are written.
 
 * `SelfInfo.fingerprint`: our 30-digit half (6 groups of 5).
 * `Contact.safety_number`: 60 digits (12 groups of 5), identical on both
   devices. Show it on the contact screen and let the user mark `verified`.
+
+## Signed contact cards (card v2)
+
+Per [servers.md](servers.md) prerequisite 1, a card binds the Olm identity
+key to the device key:
+
+```
+sig = ed25519_sign(ed, "umbra-card-v2" || PeerId bytes || ik)
+```
+
+* `PeerId bytes` is the binary PeerId (multihash, `PeerId::to_bytes`), `ik`
+  the 32 raw Curve25519 bytes. No length prefixes (the multihash is
+  self-delimiting, `ik` is fixed-size). `sig` is 64 bytes, unpadded base64,
+  in `ContactCard.sig` and the QR's `sig=`.
+* Core signs its own card (`self_info().qr_payload`, every `Hello`).
+* Every card core accepts (`parse_qr`, `add_contact`, `Hello`) is verified
+  when signed. **An invalid signature rejects the card**: `add_contact`
+  errors, `Hello` gets `Rejected(Malformed)`, and no `KeyChanged` is raised
+  (a forged card can't trigger key-change alerts).
+* **Compatibility:** unsigned (v1) cards are still accepted for contacts.
+  `Contact.signed_card` says whether we hold a valid signature; legacy
+  contacts become signed on their next signed `Hello` (same `ik`).
+* **No downgrade:** once a contact is signed, an unsigned card for it is
+  refused (`Rejected(Malformed)` / `add_contact` error).
+* **With KeyChanged:** a validly signed card with a *different* `ik` is
+  still only a key change: never auto-trusted, same flow as below. Its
+  signature is kept with the pending key and becomes the contact's card
+  signature on `accept_key_change`. A key change seen only in a key-claim
+  answer has no signature, so the contact is unsigned after accepting it
+  until the next signed `Hello`.
+* Schema v3 adds `contacts.card_sig` and `contacts.pending_card_sig`.
 
 ## Identity key changes
 
@@ -120,6 +152,222 @@ The app should show a blocking warning and ask the user to compare the
 Both return an error if nothing is pending. The DB schema moved to v2
 (columns `pending_identity_key`, `rejected_identity_key`, `key_changed_at`);
 v1 databases are migrated on `init`.
+
+## Servers, Phase 0: memberships and co-members (engine API)
+
+Phase 0 of [servers.md](servers.md). These are **engine-level** (`Core`)
+methods for Phase 1 server code in core. They are **not in the FFI** yet
+(no Dart bindings), so the app can't use them directly.
+
+```rust
+// Local membership: which of OUR identities this server uses (explicit).
+fn add_server_membership(&self, server_id: &str, identity: ServerIdentity,
+                         history: Option<HistoryVisibility>) -> Result<ServerMembership>;
+fn server_membership(&self, server_id: &str) -> Result<Option<ServerMembership>>;
+fn set_server_history(&self, server_id: &str, history: Option<HistoryVisibility>) -> Result<()>;
+// Co-members (from roster entries; Phase 1 calls these).
+fn add_co_member(self: &Arc<Self>, server_id: &str, card: ContactCard) -> Result<CoMember>;
+fn remove_co_member(&self, server_id: &str, peer_id: &str) -> Result<()>;
+fn co_member(&self, server_id: &str, peer_id: &str) -> Result<Option<CoMember>>;
+fn list_co_members(&self, server_id: Option<&str>) -> Result<Vec<CoMember>>;
+fn accept_key_change_any(self: &Arc<Self>, peer_id: &str) -> Result<()>; // contacts or co-members
+fn subscribe_server(&self) -> UnboundedReceiver<ServerInbound>;           // engine-internal
+
+enum ServerIdentity { Default, Dedicated }   // Dedicated: refused in Phase 0
+enum HistoryVisibility { Joined, Shared }    // stored only; None = unset
+struct ServerMembership { server_id, identity, history_visibility: Option<_>, joined_at_ms }
+struct CoMember { server_id, peer_id, display_name, identity_key, ed25519_key, addrs,
+                  added_at_ms, signed_card, key_changed, pending_identity_key, is_contact }
+struct ServerInbound { peer_id, server_id, kind: ServerPayloadKind, data: Vec<u8>, id, ts }
+```
+
+**Identity per server.** Every membership records which of our identities
+it uses, as an explicit parameter with no default: `Default` (the user's
+normal PeerId and keys) or `Dedicated` (a separate identity for that server).
+`Dedicated` is accepted by the API but refused in Phase 0, because it needs
+its own device key, Olm account and network identity. Rules for when it
+lands: a dedicated identity is never linked to the default one in cards,
+`Hello`s, logs or outbox rows, and is never used toward contacts. A
+membership's identity can't change. Other members may also use per-server
+identities. To us that is simply a different PeerId, so co-member records are
+keyed by **(server_id, member PeerId)**. The PeerId is derived from the
+member's Ed25519 identity key, so this is the same as keying by that key.
+
+**History visibility** is a per-server setting (`HistoryVisibility`,
+`None` = not set). Phase 0 only stores it, and nothing in core hard-wires
+"from join".
+
+**Co-member trust class.** A co-member is a peer from a server roster with
+a **signed (v2) card**. It is stored separately from contacts (table
+`co_members`), never shows up in `list_contacts`, and is **never promoted to a
+contact automatically**. Only `add_contact` (a user action) makes a contact.
+
+| From a co-member who isn't a contact | Result |
+|---|---|
+| `Hello` (must carry a valid v2 card) | `Ok`, no `ContactRequest`; unsigned → `Malformed` |
+| `ClaimOneTimeKey` | Served, with the **same per-peer limits** as contacts (claim bucket, outstanding-OTK caps) |
+| Olm `Server { server_id, .. }` | Delivered to `subscribe_server` only if they are a co-member of **that** `server_id`; else `Rejected(NotAMember)` |
+| Olm `Text` | `Rejected(NotAContact)`, nothing stored. It raises `ContactRequest { card }` (rate-limited like any contact request), matching servers.md's "handled like a contact request" (open question 6) |
+| Olm `Signal` (calls) | `Rejected(NotAContact)` |
+
+Strangers are unchanged: contact requests, and no keys.
+
+**Pins and KeyChanged.** A peer has a single pin across its contact record and
+all of its co-member records (the contact's is authoritative). The pin is
+checked on `add_co_member`, `add_contact`, `Hello` and key claims:
+
+* A different key raises `KeyChanged` once and marks **every** record of the
+  peer as pending. Roster mismatches use the new `KeyChangeSource::Roster`.
+* While a change is pending, or if any copy disagrees or the record is
+  unsigned, **all server traffic to and from the peer stops**
+  (`NotAMember`). DMs with a contact behave as before.
+* Co-member records only accept **signed** new keys. An unsigned change of a
+  co-member-only peer (a key claim answer) is refused without raising an alert.
+* `accept_key_change_any` / `reject_key_change` resolve all records of the
+  peer together. FFI `accept_key_change` is still contacts-only, so a
+  co-member-only key change can't be accepted from the app yet (Phase 1
+  members API). `reject_key_change` works for both.
+* `remove_contact` keeps the Olm sessions while the peer is still a co-member.
+  `remove_co_member` drops them once the peer is in no shared server and
+  isn't a contact.
+
+### Generalized outbox and envelope fields (Phase 0)
+
+```rust
+fn queue_server_payload(self: &Arc<Self>, peer_id: &str, server_id: &str, kind: ServerPayloadKind,
+                        data: &[u8], meta: EnvelopeMeta) -> Result<String /* payload id */>;
+struct EnvelopeMeta { seq: Option<u64>, prev: Option<String>, expires_at: Option<i64> }
+```
+
+* The outbox holds **typed items**: `Dm` (the text stays in `messages`, as
+  before) or `Server { server_id, payload }`, where the payload is the full
+  Olm plaintext for one co-member. Both kinds share the same ordering,
+  retries, flush triggers (connect, `Hello`, discovery, the 15 s tick) and the
+  **same 7-day expiry**. An expired DM is still marked `Failed`. An expired
+  server item is dropped without a `MessageStatus` (Phase 1 decides what, if
+  anything, to show).
+* A server item is sent only while the peer is a signed co-member of that
+  server with no pending key change. It is held while a change is pending,
+  and dropped if the peer leaves that server (`remove_co_member`).
+  `remove_contact` drops DM items only. Each row records which of our
+  identities sends it (`local_identity`, always `"default"` in Phase 0).
+* **Reserved envelope fields** (Jal is designing what they mean): every Olm
+  `Payload` may carry, inside the encryption,
+  * `seq`: a per-sender sequence number that only increases, for detecting
+    gaps and deletions;
+  * `prev`: the hash of the sender's previous message in the stream (a hash
+    chain), base64, at most 128 chars;
+  * `expires_at`: expiry requested by the sender, in ms since the epoch, for
+    disappearing messages.
+
+  All three are optional. They are left out of the JSON when unset, so a
+  payload without them is byte-identical to the old format. Older cores
+  ignore them (serde skips unknown fields), and future unknown fields are
+  ignored too. Core stores them with queued items (`outbox.seq / prev_hash /
+  expires_at`) and with received DMs (`messages.seq / prev_hash /
+  expires_at`), and passes them on in `ServerInbound.meta`. Core numbers
+  outgoing DMs with `seq` and checks incoming DM `seq` (see *Anti-replay*
+  below); it doesn't check `prev` chains or delete expired messages yet
+  (Phase 1). A `prev` over 128 chars is `Rejected(Malformed)`. They aren't
+  in the FFI `Message` type yet.
+* Schema v3 (migrated in one transaction, columns added only if missing):
+  `contacts.card_sig / pending_card_sig`, the tables `server_memberships`
+  and `co_members`, `outbox.kind / server_id / payload / seq / prev_hash /
+  expires_at / local_identity`, and `messages.seq / prev_hash / expires_at`.
+  Schema v4 adds the anti-replay tables `group_seen`, `seq_seen` and
+  `seq_out` (new tables only). servers.md's Phase 1 tables ("schema v3"
+  there) will be v5.
+
+### Anti-replay (Phase 0, [message-protection.md](message-protection.md#anti-replay))
+
+```rust
+fn accept_group_message(&self, session_id: &str, message_index: u32) -> Result<bool>;
+fn discard_group_session(&self, session_id: &str) -> Result<()>;
+fn check_sequence(&self, stream: &str, sender: &str, seq: u64, digest: &[u8]) -> Result<SeqVerdict>;
+enum SeqVerdict { Fresh, Duplicate, Fork, Stale }
+```
+
+* **Megolm** (hook only; Phase 0 has no group sessions): vodozemac's
+  `InboundGroupSession::decrypt` re-decrypts any index, so Phase 1 must call
+  `accept_group_message` after decrypting and before delivering. It records
+  `(session_id, message_index)` persistently (table `group_seen`) and returns
+  `false` for a replay. `discard_group_session` prunes the record when the
+  session is deleted.
+* **DMs**: `send_text` gives every DM a per-peer `seq` (1, 2, 3, ...; stream
+  `dm:<peer>` in `seq_out`), stored with the message and the outbox row.
+  On receipt, a DM with a `seq`:
+  * above everything seen from that peer is delivered and recorded;
+  * equal to a recorded one with the same content (SHA-256 of id, ts and
+    body) is a retransmission: acked `Delivered`, not delivered again;
+  * equal to a recorded one with different content is a **sender fork** (or
+    the sender's state was rolled back): logged at warn and
+    `Rejected(Replayed)`;
+  * otherwise at or below the highest seen is a replay: `Rejected(Replayed)`.
+
+  The last 1024 seqs per peer are kept, plus the highest. DMs without `seq`
+  (older cores) keep the `MessageId` dedupe only. The records survive
+  `remove_contact`, so a re-added peer's old messages can't be replayed in.
+* **A sender told `Rejected(Replayed)`** for a DM concludes the peer saw
+  higher seqs from it than it remembers (its state was rolled back, defence 1
+  of message-protection.md's anti-rollback): it drops its Olm sessions with
+  that peer (the next message starts a fresh pre-key session), jumps that
+  stream forward by `SEQ_RESTORE_GAP` (2^20), renumbers its queued DMs and
+  resends, once per message per flush.
+* **Other streams** (server channels, Phase 1) use `check_sequence` with a
+  stream name of their choice; `Fresh` is recorded. Server payloads are not
+  checked by core in Phase 0, since their `seq` is per channel and the
+  channel is inside the opaque data.
+* **Olm** needs nothing more: a replayed Olm message fails to decrypt. Call
+  signals carry no `seq`; `call_id` dedupe in `calls/` covers the rest.
+
+### Restore from an old copy (Phase 0, [message-protection.md](message-protection.md#anti-rollback))
+
+```rust
+fn epoch(&self) -> Result<String>;                                  // "<id>.<n>"
+fn check_epoch(&self, witness: Option<&str>) -> Result<EpochStatus>;
+fn recover_from_restore(&self) -> Result<String>;                   // the "restore flag"
+fn last_restore_ms(&self) -> Result<Option<i64>>;
+struct EpochStatus { epoch: String, restored: bool }
+```
+
+Keys are never reused after a restore. The database carries an **epoch**
+`(id, n)` (`meta.epoch`). `n` goes up before every Olm encrypt and before
+every one-time key is handed out, and the same value is written atomically
+to a sidecar file `<data_dir>/epoch` outside SQLCipher (database first, so a
+crash in between never looks like a restore). A restore is detected when a
+witness is ahead of the database (same id with a larger `n`, or an id this
+database has never had):
+
+* **at open**, from the sidecar. A database that has an epoch but no sidecar
+  is treated as restored too, so the app should exclude `epoch` from backups
+  and device transfers (Android `dataExtractionRules`; backups are meant to
+  be off anyway);
+* **from the app**, with `check_epoch(Some(copy))`, where `copy` is the
+  epoch the app keeps in the OS keystore item next to `db_key` (from an
+  earlier `check_epoch`). Call it after `init` and store the returned
+  `epoch` back. This also catches a restore of the whole data directory, as
+  long as the keystore wasn't rolled back too.
+
+On detection (or an explicit `recover_from_restore()`), core:
+
+1. drops **every Olm session**, so the next message to each peer starts a
+   fresh pre-key session;
+2. forgets the published **one-time key** pool (keys from the old copy may
+   have been handed out since) and **rotates the fallback key**; the next
+   key claim publishes a fresh batch;
+3. **jumps every outgoing sequence number** forward by `SEQ_RESTORE_GAP`
+   (2^20), including a floor for streams it doesn't know yet, and renumbers
+   queued DMs;
+4. records a **new epoch** (new id, the old one kept in `meta.epoch_history`
+   so an old keystore copy doesn't trigger again) and `meta.restored_at`.
+
+A rollback that no witness catches (the data dir *and* keystore restored) is
+still caught by peers: they reject our reused `seq` as `Replayed`, and we
+re-key and jump for that peer (see *Anti-replay*). Not in Phase 0: Megolm
+outbound rotation (no Megolm yet), the `Heads` exchange after `Hello`
+(Phase 1), bumping the epoch on expiry runs, and the FFI / UI side (these
+calls are engine-level; the app can't call `check_epoch` or show "This
+device's data was restored from an older copy" until they're exposed).
 
 ## Messaging
 
@@ -161,11 +409,12 @@ struct CoreConfig {
     mock: bool,                     // ADDITION, in-memory mock backend
 }
 struct SelfInfo { peer_id, fingerprint, qr_payload, display_name, identity_key, ed25519_key, addrs: Vec<String> }
-struct ContactCard { peer_id, identity_key, ed25519_key, addrs: Vec<String>, display_name: Option<String> }
+struct ContactCard { peer_id, identity_key, ed25519_key, addrs: Vec<String>, display_name: Option<String>,
+                     sig: Option<String> /* card v2, serde(default) */ }
 struct Contact { peer_id, display_name, identity_key, ed25519_key, addrs, verified: bool,
                  safety_number, added_at_ms: i64, online: bool,
-                 key_changed: bool, pending_identity_key: Option<String> }
-enum KeyChangeSource { Hello, KeyClaim, ContactCard }
+                 key_changed: bool, pending_identity_key: Option<String>, signed_card: bool }
+enum KeyChangeSource { Hello, KeyClaim, ContactCard, Roster }
 struct Message { id, peer_id, outgoing: bool, body, timestamp_ms: i64, status: DeliveryStatus, read: bool }
 struct ConversationSummary { peer_id, display_name, last_message: Option<Message>, unread_count: u32, updated_at_ms: i64 }
 struct NetworkInfo { running: bool, listen_addrs: Vec<String>, connected_peers: u32, relay_reservations: u32 }
@@ -203,7 +452,8 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
 3. Additions: `CoreConfig.listen_addrs`, `CoreConfig.mock`, `network_status()`,
    `SelfInfo.{identity_key, ed25519_key, addrs}`, optional `name=` in the QR,
    `Contact.{safety_number, added_at_ms, online, key_changed, pending_identity_key}`,
-   `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change`.
+   `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change`,
+   `ContactCard.sig` / QR `sig=` (card v2), `Contact.signed_card`.
 
 ## Protocol summary
 
@@ -220,10 +470,36 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
 * **`/umbra/msg/1`** (CBOR): `Hello { card }` (once per connection) or
   `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
   `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch |
-  RateLimited)`.
-  Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal}`; `to` must be
+  RateLimited | NotAMember | Replayed)`. (Older cores can't decode
+  `Replayed`; only new cores send it, and only for payloads carrying `seq`,
+  which only new cores send.)
+  Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal | Server,
+  seq?, prev?, expires_at?}`; `to` must be
   the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per
   peer, pre-key messages matched by session id.
+* **Padding** ([message-protection.md](message-protection.md#padding)):
+  every Olm plaintext core sends is padded, before encryption, to the next
+  bucket of **256 B, 1 KiB, 4 KiB, 16 KiB or 64 KiB**; a plaintext over 64 KiB
+  (a full 64 KiB text or signal plus JSON framing and escaping) rounds up to a
+  multiple of 64 KiB, well under the 1 MiB codec cap. The padding is trailing
+  ASCII spaces after the JSON, which every JSON parser skips, so it is
+  backward-compatible both ways: older cores parse padded payloads, and new
+  cores accept unpadded ones. The receiver strips trailing whitespace before
+  parsing. The usable caps don't change (text 64 KiB, signal payload 64 KiB,
+  server data 64 KiB). Padding hides lengths within a bucket, not message
+  counts or timing. (`proto::{PAD_BUCKETS, padded_len, encode_payload,
+  decode_payload}`.)
+* **Server payload carrier (Phase 0)**: `PayloadBody::Server { server_id,
+  kind: ServerPayloadKind, data }`, with `kind` one of `ServerKey |
+  ServerKeyForward | ServerKeyRequest | ServerManifest | ServerOp` and `data`
+  opaque unpadded base64, at most 64 KiB decoded. **This deviates from
+  servers.md**, which lists those as separate top-level `PayloadBody`
+  variants. One carrier keeps `server_id` outside the opaque bytes, so the
+  co-member check ("is the sender in *this* server?") is one uniform check
+  even for `ServerManifest { bytes }` / `ServerOp { bytes }`. Phase 1 defines
+  each kind's `data`. `ServerInvite` is a DM and is not a server payload.
+  Older cores reply `Rejected(Malformed)` (accepted before 1.0, as in
+  servers.md).
 * **Contact flow**: Alice scans Bob → Alice's Hello reaches Bob → Bob gets
   `ContactRequest` (at most once per identity per 10 min until accepted,
   subject to the limits below; still dedupe by `peer_id` in the UI). Messages Alice sends meanwhile wait in her outbox and flush

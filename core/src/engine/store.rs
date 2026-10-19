@@ -11,8 +11,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
 use crate::api::types::{Contact, ConversationSummary, DeliveryStatus, Message};
+use crate::engine::proto::EnvelopeMeta;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -54,16 +55,91 @@ CREATE TABLE IF NOT EXISTS outbox (
     last_attempt INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS outbox_peer ON outbox(peer_id, created_at);
+-- v3: servers Phase 0 (docs/servers.md). Which of OUR identities a server
+-- membership uses, and per-server settings that later phases read.
+CREATE TABLE IF NOT EXISTS server_memberships (
+    server_id          TEXT PRIMARY KEY,
+    identity           TEXT NOT NULL,   -- 'default' | 'dedicated'
+    history_visibility TEXT,            -- NULL = not set (policy decides)
+    joined_at          INTEGER NOT NULL
+);
+-- Co-members: peers we share a server with. NOT contacts. One row per
+-- (server, member identity); the member identity is their PeerId, which is
+-- derived from (and so equivalent to) their Ed25519 key.
+CREATE TABLE IF NOT EXISTS co_members (
+    server_id             TEXT NOT NULL,
+    peer_id               TEXT NOT NULL,
+    display_name          TEXT NOT NULL DEFAULT '',
+    identity_key          TEXT NOT NULL,
+    ed25519_key           TEXT NOT NULL,
+    card_sig              TEXT,
+    addrs                 TEXT NOT NULL DEFAULT '[]',
+    added_at              INTEGER NOT NULL,
+    pending_identity_key  TEXT,
+    pending_card_sig      TEXT,
+    rejected_identity_key TEXT,
+    PRIMARY KEY (server_id, peer_id)
+);
+CREATE INDEX IF NOT EXISTS co_members_peer ON co_members(peer_id);
+-- v4: anti-replay (docs/message-protection.md#anti-replay).
+-- Every (Megolm session, message index) accepted, until the session goes.
+CREATE TABLE IF NOT EXISTS group_seen (
+    session_id TEXT NOT NULL,
+    msg_index  INTEGER NOT NULL,
+    PRIMARY KEY (session_id, msg_index)
+) WITHOUT ROWID;
+-- Recent (stream, sender, seq) accepted, with a digest of the content so a
+-- reused seq with different content shows up as a fork. The highest seq per
+-- (stream, sender) is always kept.
+CREATE TABLE IF NOT EXISTS seq_seen (
+    stream TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    seq    INTEGER NOT NULL,
+    digest BLOB NOT NULL,
+    PRIMARY KEY (stream, sender, seq)
+) WITHOUT ROWID;
+-- Our own next outgoing seq per stream (e.g. 'dm:<peer>').
+CREATE TABLE IF NOT EXISTS seq_out (
+    stream TEXT PRIMARY KEY,
+    next   INTEGER NOT NULL
+);
 "#;
 
 pub struct Store {
     conn: Mutex<Connection>,
 }
 
+/// Outcome of checking a `(stream, sender, seq)` against what was accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeqVerdict {
+    /// Above everything seen: accept (and [`Store::seq_commit`] it).
+    Fresh,
+    /// Same seq, same content: a retransmission. Ack, don't deliver again.
+    Duplicate,
+    /// Same seq, different content: the sender forked (or was rolled back).
+    Fork,
+    /// At or below the highest seq seen and not a known duplicate: a replay.
+    Stale,
+}
+
+/// `seq_seen` rows kept per (stream, sender) besides the highest.
+pub const SEQ_SEEN_KEEP: i64 = 1024;
+const META_SEQ_FLOOR: &str = "seq_floor";
+
 #[derive(Debug, Clone)]
 pub struct SessionRow {
     pub session_id: String,
     pub pickle: String,
+}
+
+/// What an outbox row carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboxItem {
+    /// A DM: the text lives in `messages` (`msg_id`).
+    Dm,
+    /// A server-scoped payload: `payload` is the full Olm plaintext
+    /// (`Payload` JSON) for co-member `peer_id`.
+    Server { server_id: String, payload: Vec<u8> },
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +148,37 @@ pub struct OutboxRow {
     pub peer_id: String,
     pub created_at: i64,
     pub attempts: i64,
+    pub item: OutboxItem,
+    pub meta: EnvelopeMeta,
+    /// Which of our identities sends it (`"default"`; see `ServerIdentity`).
+    pub local_identity: String,
+}
+
+const OUTBOX_COLS: &str =
+    "msg_id, peer_id, created_at, attempts, kind, server_id, payload, seq, prev_hash, expires_at, local_identity";
+
+fn row_to_outbox(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxRow> {
+    let kind: String = r.get(4)?;
+    let item = match kind.as_str() {
+        "server" => OutboxItem::Server {
+            server_id: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            payload: r.get::<_, Option<Vec<u8>>>(6)?.unwrap_or_default(),
+        },
+        _ => OutboxItem::Dm,
+    };
+    Ok(OutboxRow {
+        msg_id: r.get(0)?,
+        peer_id: r.get(1)?,
+        created_at: r.get(2)?,
+        attempts: r.get(3)?,
+        item,
+        meta: EnvelopeMeta {
+            seq: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+            prev: r.get(8)?,
+            expires_at: r.get(9)?,
+        },
+        local_identity: r.get(10)?,
+    })
 }
 
 fn status_to_i(s: DeliveryStatus) -> i64 {
@@ -106,6 +213,54 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
 
 const MSG_COLS: &str = "id, peer_id, outgoing, body, ts, status, read";
 
+/// One co-member record (`server_id`, `peer_id`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoMemberRow {
+    pub server_id: String,
+    pub peer_id: String,
+    pub display_name: String,
+    pub identity_key: String,
+    pub ed25519_key: String,
+    /// Card v2 signature over (`peer_id`, `identity_key`). Required to add a
+    /// co-member; `None` only after accepting an unsigned key change, which
+    /// blocks server traffic until a signed `Hello` restores it.
+    pub card_sig: Option<String>,
+    pub addrs: Vec<String>,
+    pub added_at: i64,
+    pub pending_identity_key: Option<String>,
+    pub pending_card_sig: Option<String>,
+    pub rejected_identity_key: Option<String>,
+}
+
+const CO_MEMBER_COLS: &str = "server_id, peer_id, display_name, identity_key, ed25519_key, card_sig, addrs, added_at, pending_identity_key, pending_card_sig, rejected_identity_key";
+
+fn row_to_co_member(r: &rusqlite::Row<'_>) -> rusqlite::Result<CoMemberRow> {
+    let addrs: String = r.get(6)?;
+    Ok(CoMemberRow {
+        server_id: r.get(0)?,
+        peer_id: r.get(1)?,
+        display_name: r.get(2)?,
+        identity_key: r.get(3)?,
+        ed25519_key: r.get(4)?,
+        card_sig: r.get(5)?,
+        addrs: serde_json::from_str(&addrs).unwrap_or_default(),
+        added_at: r.get(7)?,
+        pending_identity_key: r.get(8)?,
+        pending_card_sig: r.get(9)?,
+        rejected_identity_key: r.get(10)?,
+    })
+}
+
+/// Local server membership record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipRow {
+    pub server_id: String,
+    /// `"default"` or `"dedicated"`.
+    pub identity: String,
+    pub history_visibility: Option<String>,
+    pub joined_at: i64,
+}
+
 /// Contact row without the derived fields (safety number, online).
 #[derive(Debug, Clone)]
 pub struct ContactRow {
@@ -120,6 +275,10 @@ pub struct ContactRow {
     pub pending_identity_key: Option<String>,
     /// Identity key the user refused; presenting it again is ignored silently.
     pub rejected_identity_key: Option<String>,
+    /// Card v2 signature over (`peer_id`, `identity_key`); `None` = legacy.
+    pub card_sig: Option<String>,
+    /// Card v2 signature that came with `pending_identity_key`, if any.
+    pub pending_card_sig: Option<String>,
 }
 
 impl ContactRow {
@@ -136,6 +295,7 @@ impl ContactRow {
             online,
             key_changed: self.pending_identity_key.is_some(),
             pending_identity_key: self.pending_identity_key,
+            signed_card: self.card_sig.is_some(),
         }
     }
 }
@@ -152,11 +312,13 @@ fn row_to_contact(r: &rusqlite::Row<'_>) -> rusqlite::Result<ContactRow> {
         added_at: r.get(6)?,
         pending_identity_key: r.get(7)?,
         rejected_identity_key: r.get(8)?,
+        card_sig: r.get(9)?,
+        pending_card_sig: r.get(10)?,
     })
 }
 
 const CONTACT_COLS: &str =
-    "peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at, pending_identity_key, rejected_identity_key";
+    "peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at, pending_identity_key, rejected_identity_key, card_sig, pending_card_sig";
 
 impl Store {
     /// Open or create `path`, keyed with the raw 32-byte `key`.
@@ -199,7 +361,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn conn_for_test(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn conn_for_test(&self) -> MutexGuard<'_, Connection> {
         self.c()
     }
 
@@ -236,10 +398,11 @@ impl Store {
 
     pub fn upsert_contact(&self, c: &ContactRow) -> Result<()> {
         self.c().execute(
-            "INSERT INTO contacts(peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO contacts(peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at, card_sig)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(peer_id) DO UPDATE SET display_name = excluded.display_name,
-               addrs = excluded.addrs, verified = excluded.verified",
+               addrs = excluded.addrs, verified = excluded.verified,
+               card_sig = COALESCE(excluded.card_sig, contacts.card_sig)",
             params![
                 c.peer_id,
                 c.display_name,
@@ -247,7 +410,8 @@ impl Store {
                 c.ed25519_key,
                 serde_json::to_string(&c.addrs)?,
                 c.verified as i64,
-                c.added_at
+                c.added_at,
+                c.card_sig
             ],
         )?;
         Ok(())
@@ -308,11 +472,28 @@ impl Store {
         Ok(())
     }
 
-    /// Flag a key change (keeps the trusted key in place).
-    pub fn set_pending_key(&self, peer_id: &str, key: &str, now: i64) -> Result<()> {
+    /// Flag a key change (keeps the trusted key in place). `sig` is the card
+    /// v2 signature that came with the new key, if any.
+    pub fn set_pending_key(
+        &self,
+        peer_id: &str,
+        key: &str,
+        sig: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
         self.c().execute(
-            "UPDATE contacts SET pending_identity_key = ?2, key_changed_at = ?3 WHERE peer_id = ?1",
-            params![peer_id, key, now],
+            "UPDATE contacts SET pending_identity_key = ?2, pending_card_sig = ?3, key_changed_at = ?4
+             WHERE peer_id = ?1",
+            params![peer_id, key, sig, now],
+        )?;
+        Ok(())
+    }
+
+    /// Record a (verified) card v2 signature for the trusted key.
+    pub fn set_card_sig(&self, peer_id: &str, sig: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE contacts SET card_sig = ?2 WHERE peer_id = ?1",
+            params![peer_id, sig],
         )?;
         Ok(())
     }
@@ -322,6 +503,7 @@ impl Store {
     pub fn accept_pending_key(&self, peer_id: &str) -> Result<()> {
         let n = self.c().execute(
             "UPDATE contacts SET identity_key = pending_identity_key, pending_identity_key = NULL,
+               card_sig = pending_card_sig, pending_card_sig = NULL,
                rejected_identity_key = NULL, key_changed_at = NULL, verified = 0
              WHERE peer_id = ?1 AND pending_identity_key IS NOT NULL",
             [peer_id],
@@ -336,7 +518,7 @@ impl Store {
     pub fn reject_pending_key(&self, peer_id: &str) -> Result<()> {
         let n = self.c().execute(
             "UPDATE contacts SET rejected_identity_key = pending_identity_key,
-               pending_identity_key = NULL, key_changed_at = NULL
+               pending_identity_key = NULL, pending_card_sig = NULL, key_changed_at = NULL
              WHERE peer_id = ?1 AND pending_identity_key IS NOT NULL",
             [peer_id],
         )?;
@@ -346,18 +528,155 @@ impl Store {
         Ok(())
     }
 
-    /// Delete contact plus all sessions, messages and outbox entries.
-    pub fn remove_contact(&self, peer_id: &str) -> Result<()> {
+    /// Delete contact plus its messages and outbox entries, and its Olm
+    /// sessions unless `keep_sessions` (the peer is still a co-member).
+    pub fn remove_contact(&self, peer_id: &str, keep_sessions: bool) -> Result<()> {
         let mut c = self.c();
         let tx = c.transaction()?;
         let n = tx.execute("DELETE FROM contacts WHERE peer_id = ?1", [peer_id])?;
-        tx.execute("DELETE FROM olm_sessions WHERE peer_id = ?1", [peer_id])?;
+        if !keep_sessions {
+            tx.execute("DELETE FROM olm_sessions WHERE peer_id = ?1", [peer_id])?;
+        }
         tx.execute("DELETE FROM messages WHERE peer_id = ?1", [peer_id])?;
-        tx.execute("DELETE FROM outbox WHERE peer_id = ?1", [peer_id])?;
+        tx.execute(
+            "DELETE FROM outbox WHERE peer_id = ?1 AND kind = 'dm'",
+            [peer_id],
+        )?;
         tx.commit()?;
         if n == 0 {
             bail!("unknown contact {peer_id}");
         }
+        Ok(())
+    }
+
+    // ---- servers / co-members ----
+
+    pub fn upsert_membership(&self, m: &MembershipRow) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO server_memberships(server_id, identity, history_visibility, joined_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(server_id) DO UPDATE SET history_visibility = excluded.history_visibility",
+            params![m.server_id, m.identity, m.history_visibility, m.joined_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_membership(&self, server_id: &str) -> Result<Option<MembershipRow>> {
+        Ok(self
+            .c()
+            .query_row(
+                "SELECT server_id, identity, history_visibility, joined_at FROM server_memberships WHERE server_id = ?1",
+                [server_id],
+                |r| {
+                    Ok(MembershipRow {
+                        server_id: r.get(0)?,
+                        identity: r.get(1)?,
+                        history_visibility: r.get(2)?,
+                        joined_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Insert or refresh a co-member. The pinned key and key-change state are
+    /// never overwritten here (callers compare keys first).
+    pub fn upsert_co_member(&self, m: &CoMemberRow) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO co_members(server_id, peer_id, display_name, identity_key, ed25519_key, card_sig, addrs, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(server_id, peer_id) DO UPDATE SET display_name = excluded.display_name,
+               addrs = excluded.addrs, card_sig = COALESCE(co_members.card_sig, excluded.card_sig)",
+            params![
+                m.server_id,
+                m.peer_id,
+                m.display_name,
+                m.identity_key,
+                m.ed25519_key,
+                m.card_sig,
+                serde_json::to_string(&m.addrs)?,
+                m.added_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// All co-member records of one peer (one per shared server).
+    pub fn co_member_rows(&self, peer_id: &str) -> Result<Vec<CoMemberRow>> {
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT {CO_MEMBER_COLS} FROM co_members WHERE peer_id = ?1 ORDER BY server_id"
+        ))?;
+        let rows = st
+            .query_map([peer_id], row_to_co_member)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn list_co_members(&self, server_id: Option<&str>) -> Result<Vec<CoMemberRow>> {
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT {CO_MEMBER_COLS} FROM co_members WHERE ?1 IS NULL OR server_id = ?1
+             ORDER BY server_id, display_name, peer_id"
+        ))?;
+        let rows = st
+            .query_map([server_id], row_to_co_member)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Remove a co-member record and its queued server payloads for that
+    /// server. Returns false if there was no such record.
+    pub fn remove_co_member(&self, server_id: &str, peer_id: &str) -> Result<bool> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let n = tx.execute(
+            "DELETE FROM co_members WHERE server_id = ?1 AND peer_id = ?2",
+            params![server_id, peer_id],
+        )?;
+        tx.execute(
+            "DELETE FROM outbox WHERE kind = 'server' AND server_id = ?1 AND peer_id = ?2",
+            params![server_id, peer_id],
+        )?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    pub fn co_member_seen(&self, peer_id: &str, addrs: &[String], sig: Option<&str>) -> Result<()> {
+        self.c().execute(
+            "UPDATE co_members SET addrs = ?2, card_sig = COALESCE(card_sig, ?3) WHERE peer_id = ?1",
+            params![peer_id, serde_json::to_string(addrs)?, sig],
+        )?;
+        Ok(())
+    }
+
+    /// Flag a key change on every record of `peer_id`.
+    pub fn co_member_set_pending(&self, peer_id: &str, key: &str, sig: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE co_members SET pending_identity_key = ?2, pending_card_sig = ?3 WHERE peer_id = ?1",
+            params![peer_id, key, sig],
+        )?;
+        Ok(())
+    }
+
+    /// Pin `key` (with `sig`, if any) on every record of `peer_id` and clear
+    /// key-change state.
+    pub fn co_member_set_key(&self, peer_id: &str, key: &str, sig: Option<&str>) -> Result<()> {
+        self.c().execute(
+            "UPDATE co_members SET identity_key = ?2, card_sig = ?3, pending_identity_key = NULL,
+               pending_card_sig = NULL, rejected_identity_key = NULL WHERE peer_id = ?1",
+            params![peer_id, key, sig],
+        )?;
+        Ok(())
+    }
+
+    pub fn co_member_reject(&self, peer_id: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE co_members SET rejected_identity_key = pending_identity_key,
+               pending_identity_key = NULL, pending_card_sig = NULL
+             WHERE peer_id = ?1 AND pending_identity_key IS NOT NULL",
+            [peer_id],
+        )?;
         Ok(())
     }
 
@@ -395,6 +714,11 @@ impl Store {
         Ok(())
     }
 
+    /// Drop every Olm session (after a restore).
+    pub fn delete_all_sessions(&self) -> Result<usize> {
+        Ok(self.c().execute("DELETE FROM olm_sessions", [])?)
+    }
+
     pub fn delete_sessions(&self, peer_id: &str) -> Result<()> {
         self.c()
             .execute("DELETE FROM olm_sessions WHERE peer_id = ?1", [peer_id])?;
@@ -415,11 +739,46 @@ impl Store {
 
     /// Returns false if a message with this id already existed (dedupe).
     pub fn insert_message(&self, m: &Message) -> Result<bool> {
+        self.insert_message_with_meta(m, &EnvelopeMeta::default())
+    }
+
+    /// [`Self::insert_message`] storing the optional envelope fields too.
+    pub fn insert_message_with_meta(&self, m: &Message, meta: &EnvelopeMeta) -> Result<bool> {
         let n = self.c().execute(
-            "INSERT OR IGNORE INTO messages(id, peer_id, outgoing, body, ts, status, read) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![m.id, m.peer_id, m.outgoing as i64, m.body, m.timestamp_ms, status_to_i(m.status), m.read as i64],
+            "INSERT OR IGNORE INTO messages(id, peer_id, outgoing, body, ts, status, read, seq, prev_hash, expires_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                m.id,
+                m.peer_id,
+                m.outgoing as i64,
+                m.body,
+                m.timestamp_ms,
+                status_to_i(m.status),
+                m.read as i64,
+                meta.seq.map(|v| v as i64),
+                meta.prev,
+                meta.expires_at
+            ],
         )?;
         Ok(n == 1)
+    }
+
+    /// The optional envelope fields stored with a message.
+    pub fn message_meta(&self, id: &str) -> Result<Option<EnvelopeMeta>> {
+        Ok(self
+            .c()
+            .query_row(
+                "SELECT seq, prev_hash, expires_at FROM messages WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(EnvelopeMeta {
+                        seq: r.get::<_, Option<i64>>(0)?.map(|v| v as u64),
+                        prev: r.get(1)?,
+                        expires_at: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn get_message(&self, id: &str) -> Result<Option<Message>> {
@@ -505,30 +864,219 @@ impl Store {
         Ok(out)
     }
 
+    // ---- anti-replay ----
+
+    /// Record a Megolm `(session_id, index)`. `false` if it was already
+    /// accepted (a replay).
+    pub fn group_seen_record(&self, session_id: &str, index: u32) -> Result<bool> {
+        Ok(self.c().execute(
+            "INSERT OR IGNORE INTO group_seen(session_id, msg_index) VALUES (?1, ?2)",
+            params![session_id, index],
+        )? == 1)
+    }
+
+    /// Drop the replay record of a discarded group session.
+    pub fn group_seen_forget(&self, session_id: &str) -> Result<()> {
+        self.c()
+            .execute("DELETE FROM group_seen WHERE session_id = ?1", [session_id])?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn group_seen_count(&self, session_id: &str) -> Result<i64> {
+        Ok(self.c().query_row(
+            "SELECT COUNT(*) FROM group_seen WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Check a `(stream, sender, seq)` without recording it.
+    pub fn seq_check(
+        &self,
+        stream: &str,
+        sender: &str,
+        seq: u64,
+        digest: &[u8],
+    ) -> Result<SeqVerdict> {
+        let c = self.c();
+        let seq = i64::try_from(seq).map_err(|_| anyhow!("seq out of range"))?;
+        let same: Option<Vec<u8>> = c
+            .query_row(
+                "SELECT digest FROM seq_seen WHERE stream = ?1 AND sender = ?2 AND seq = ?3",
+                params![stream, sender, seq],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(d) = same {
+            return Ok(if d == digest {
+                SeqVerdict::Duplicate
+            } else {
+                SeqVerdict::Fork
+            });
+        }
+        let max: Option<i64> = c.query_row(
+            "SELECT MAX(seq) FROM seq_seen WHERE stream = ?1 AND sender = ?2",
+            params![stream, sender],
+            |r| r.get(0),
+        )?;
+        Ok(match max {
+            Some(m) if seq <= m => SeqVerdict::Stale,
+            _ => SeqVerdict::Fresh,
+        })
+    }
+
+    /// Record an accepted `(stream, sender, seq)`, keeping the most recent
+    /// [`SEQ_SEEN_KEEP`] per (stream, sender).
+    pub fn seq_commit(&self, stream: &str, sender: &str, seq: u64, digest: &[u8]) -> Result<()> {
+        let seq = i64::try_from(seq).map_err(|_| anyhow!("seq out of range"))?;
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO seq_seen(stream, sender, seq, digest) VALUES (?1, ?2, ?3, ?4)",
+            params![stream, sender, seq, digest],
+        )?;
+        tx.execute(
+            "DELETE FROM seq_seen WHERE stream = ?1 AND sender = ?2 AND seq NOT IN
+               (SELECT seq FROM seq_seen WHERE stream = ?1 AND sender = ?2 ORDER BY seq DESC LIMIT ?3)",
+            params![stream, sender, SEQ_SEEN_KEEP],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop every seq record of `stream` (e.g. a server we left).
+    pub fn seq_forget_stream(&self, stream: &str) -> Result<()> {
+        self.c()
+            .execute("DELETE FROM seq_seen WHERE stream = ?1", [stream])?;
+        Ok(())
+    }
+
+    /// Take our next outgoing seq on `stream`. Starts at 1, and never below
+    /// the floor set by [`Self::seq_jump_all`].
+    pub fn seq_next(&self, stream: &str) -> Result<u64> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let floor = meta_i64(&tx, META_SEQ_FLOOR)?.unwrap_or(0);
+        let cur: Option<i64> = tx
+            .query_row(
+                "SELECT next FROM seq_out WHERE stream = ?1",
+                [stream],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let n = cur.unwrap_or(1).max(floor + 1).max(1);
+        tx.execute(
+            "INSERT INTO seq_out(stream, next) VALUES (?1, ?2)
+             ON CONFLICT(stream) DO UPDATE SET next = excluded.next",
+            params![stream, n + 1],
+        )?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    /// Jump one outgoing stream forward by `gap` (a peer saw higher seqs
+    /// from us than we remember).
+    pub fn seq_jump(&self, stream: &str, gap: u64) -> Result<()> {
+        let gap = i64::try_from(gap).map_err(|_| anyhow!("gap out of range"))?;
+        self.c().execute(
+            "INSERT INTO seq_out(stream, next) VALUES (?1, ?2 + 1)
+             ON CONFLICT(stream) DO UPDATE SET next = next + ?2",
+            params![stream, gap],
+        )?;
+        Ok(())
+    }
+
+    /// Jump every outgoing stream, and the floor for streams not seen yet,
+    /// forward by `gap` (after a restore).
+    pub fn seq_jump_all(&self, gap: u64) -> Result<()> {
+        let gap = i64::try_from(gap).map_err(|_| anyhow!("gap out of range"))?;
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute("UPDATE seq_out SET next = next + ?1", [gap])?;
+        let floor = meta_i64(&tx, META_SEQ_FLOOR)?.unwrap_or(0) + gap;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![META_SEQ_FLOOR, floor.to_string().into_bytes()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Give a queued item a new seq (outbox row and, for DMs, the message).
+    pub fn outbox_set_seq(&self, msg_id: &str, seq: u64) -> Result<()> {
+        let seq = i64::try_from(seq).map_err(|_| anyhow!("seq out of range"))?;
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute(
+            "UPDATE outbox SET seq = ?2 WHERE msg_id = ?1",
+            params![msg_id, seq],
+        )?;
+        tx.execute(
+            "UPDATE messages SET seq = ?2 WHERE id = ?1",
+            params![msg_id, seq],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---- outbox ----
 
+    /// Queue a DM (text in `messages`).
     pub fn outbox_add(&self, msg_id: &str, peer_id: &str, now: i64) -> Result<()> {
+        self.outbox_add_item(
+            msg_id,
+            peer_id,
+            now,
+            &OutboxItem::Dm,
+            &EnvelopeMeta::default(),
+            "default",
+        )
+    }
+
+    /// Queue any item. Ids are unique across kinds; a duplicate is ignored.
+    pub fn outbox_add_item(
+        &self,
+        msg_id: &str,
+        peer_id: &str,
+        now: i64,
+        item: &OutboxItem,
+        meta: &EnvelopeMeta,
+        local_identity: &str,
+    ) -> Result<()> {
+        let (kind, server_id, payload) = match item {
+            OutboxItem::Dm => ("dm", None, None),
+            OutboxItem::Server { server_id, payload } => {
+                ("server", Some(server_id.as_str()), Some(payload.as_slice()))
+            }
+        };
         self.c().execute(
-            "INSERT OR IGNORE INTO outbox(msg_id, peer_id, created_at) VALUES (?1, ?2, ?3)",
-            params![msg_id, peer_id, now],
+            "INSERT OR IGNORE INTO outbox(msg_id, peer_id, created_at, kind, server_id, payload, seq, prev_hash, expires_at, local_identity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                msg_id,
+                peer_id,
+                now,
+                kind,
+                server_id,
+                payload,
+                meta.seq.map(|v| v as i64),
+                meta.prev,
+                meta.expires_at,
+                local_identity
+            ],
         )?;
         Ok(())
     }
 
     pub fn outbox_for(&self, peer_id: &str) -> Result<Vec<OutboxRow>> {
         let c = self.c();
-        let mut st = c.prepare(
-            "SELECT msg_id, peer_id, created_at, attempts FROM outbox WHERE peer_id = ?1 ORDER BY created_at, rowid",
-        )?;
+        let mut st = c.prepare(&format!(
+            "SELECT {OUTBOX_COLS} FROM outbox WHERE peer_id = ?1 ORDER BY created_at, rowid"
+        ))?;
         let rows = st
-            .query_map([peer_id], |r| {
-                Ok(OutboxRow {
-                    msg_id: r.get(0)?,
-                    peer_id: r.get(1)?,
-                    created_at: r.get(2)?,
-                    attempts: r.get(3)?,
-                })
-            })?
+            .query_map([peer_id], row_to_outbox)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -556,21 +1104,34 @@ impl Store {
         Ok(())
     }
 
-    /// Remove and return ids of entries created before `cutoff`.
-    pub fn outbox_expire(&self, cutoff: i64) -> Result<Vec<(String, String)>> {
+    /// Remove and return entries created before `cutoff` (all kinds).
+    pub fn outbox_expire(&self, cutoff: i64) -> Result<Vec<OutboxRow>> {
         let mut c = self.c();
         let tx = c.transaction()?;
         let rows = {
-            let mut st = tx.prepare("SELECT msg_id, peer_id FROM outbox WHERE created_at < ?1")?;
+            let mut st = tx.prepare(&format!(
+                "SELECT {OUTBOX_COLS} FROM outbox WHERE created_at < ?1"
+            ))?;
             let rows = st
-                .query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+                .query_map([cutoff], row_to_outbox)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
         tx.execute("DELETE FROM outbox WHERE created_at < ?1", [cutoff])?;
         tx.commit()?;
         Ok(rows)
     }
+}
+
+fn meta_i64(c: &Connection, key: &str) -> Result<Option<i64>> {
+    Ok(
+        c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
+        .optional()?
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok()),
+    )
 }
 
 /// v2 columns on `contacts` (key-change tracking).
@@ -580,10 +1141,45 @@ const V2_CONTACT_COLUMNS: &[(&str, &str)] = &[
     ("key_changed_at", "INTEGER"),
 ];
 
+/// Columns added after v1, per table. New tables are plain
+/// `CREATE TABLE IF NOT EXISTS` in [`SCHEMA`]; only columns on existing
+/// tables need listing here.
+const ADDED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
+    ("contacts", V2_CONTACT_COLUMNS),
+    // v3: card v2 signatures.
+    (
+        "contacts",
+        &[("card_sig", "TEXT"), ("pending_card_sig", "TEXT")],
+    ),
+    // v3: generalized outbox (typed items) + reserved envelope fields.
+    (
+        "outbox",
+        &[
+            ("kind", "TEXT NOT NULL DEFAULT 'dm'"),
+            ("server_id", "TEXT"),
+            ("payload", "BLOB"),
+            ("seq", "INTEGER"),
+            ("prev_hash", "TEXT"),
+            ("expires_at", "INTEGER"),
+            ("local_identity", "TEXT NOT NULL DEFAULT 'default'"),
+        ],
+    ),
+    (
+        "messages",
+        &[
+            ("seq", "INTEGER"),
+            ("prev_hash", "TEXT"),
+            ("expires_at", "INTEGER"),
+        ],
+    ),
+];
+
 /// Bring the schema to [`SCHEMA_VERSION`] in one transaction: the column
 /// additions and the `schema_version` bump commit together or not at all.
 /// Columns are added only if missing (`PRAGMA table_info`), so a database
 /// left half-migrated by an older build, or migrated twice, still opens.
+/// The column check runs on every open (a few pragma reads), so it does
+/// not depend on the recorded version being accurate.
 fn migrate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     let v: i64 = tx
@@ -599,15 +1195,15 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     if v > SCHEMA_VERSION {
         bail!("database schema {v} is newer than this build");
     }
-    if v < 2 {
+    for (table, cols) in ADDED_COLUMNS {
         let have: std::collections::HashSet<String> = {
-            let mut st = tx.prepare("SELECT name FROM pragma_table_info('contacts')")?;
-            let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+            let mut st = tx.prepare("SELECT name FROM pragma_table_info(?1)")?;
+            let rows = st.query_map([table], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
-        for (col, ty) in V2_CONTACT_COLUMNS {
+        for (col, ty) in *cols {
             if !have.contains(*col) {
-                tx.execute_batch(&format!("ALTER TABLE contacts ADD COLUMN {col} {ty};"))?;
+                tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {ty};"))?;
             }
         }
     }
@@ -655,6 +1251,8 @@ mod tests {
             added_at: 1,
             pending_identity_key: None,
             rejected_identity_key: None,
+            card_sig: None,
+            pending_card_sig: None,
         }
     }
 
@@ -711,14 +1309,14 @@ mod tests {
         let c = s.get_contact("p").unwrap().unwrap();
         assert!(c.verified && c.pending_identity_key.is_none());
         assert!(s.accept_pending_key("p").is_err());
-        s.set_pending_key("p", "ik2", 5).unwrap();
+        s.set_pending_key("p", "ik2", None, 5).unwrap();
         s.reject_pending_key("p").unwrap();
         let c = s.get_contact("p").unwrap().unwrap();
         assert_eq!(
             (c.identity_key.as_str(), c.rejected_identity_key.as_deref()),
             ("ik1", Some("ik2"))
         );
-        s.set_pending_key("p", "ik3", 6).unwrap();
+        s.set_pending_key("p", "ik3", None, 6).unwrap();
         s.accept_pending_key("p").unwrap();
         let c = s.get_contact("p").unwrap().unwrap();
         assert_eq!(c.identity_key, "ik3");
@@ -766,6 +1364,22 @@ mod tests {
             v
         };
         let s = Store::open(&path, &KEY).expect("half-migrated db opens");
+        for (table, col) in [
+            ("outbox", "kind"),
+            ("outbox", "local_identity"),
+            ("messages", "expires_at"),
+            ("contacts", "card_sig"),
+        ] {
+            let n: i64 = s
+                .conn_for_test()
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    [table, col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{table}.{col}");
+        }
         assert_eq!(
             s.meta_get_i64("schema_version").unwrap(),
             Some(SCHEMA_VERSION)
@@ -774,7 +1388,7 @@ mod tests {
         for (c, _) in V2_CONTACT_COLUMNS {
             assert_eq!(after.iter().filter(|x| x == c).count(), 1, "{c}");
         }
-        s.set_pending_key("p", "ik2", 5).unwrap();
+        s.set_pending_key("p", "ik2", None, 5).unwrap();
         drop(s);
 
         // Version marker lost but all columns present: runs again, no error.
@@ -816,6 +1430,39 @@ mod tests {
         conn.execute_batch("DROP TRIGGER fail_bump;").unwrap();
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
+    }
+
+    #[test]
+    fn outbox_rows_are_typed_and_scoped() {
+        let s = Store::open_in_memory(&KEY).unwrap();
+        s.upsert_contact(&contact("p1")).unwrap();
+        s.outbox_add("dm1", "p1", 1).unwrap();
+        let meta = EnvelopeMeta {
+            seq: Some(9),
+            prev: Some("h".into()),
+            expires_at: Some(10),
+        };
+        let item = OutboxItem::Server {
+            server_id: "srv".into(),
+            payload: b"{}".to_vec(),
+        };
+        s.outbox_add_item("sv1", "p1", 2, &item, &meta, "default")
+            .unwrap();
+        let rows = s.outbox_for("p1").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0].item.clone(), rows[0].meta.clone()),
+            (OutboxItem::Dm, EnvelopeMeta::default())
+        );
+        assert_eq!((rows[1].item.clone(), rows[1].meta.clone()), (item, meta));
+        // Removing the contact drops DM rows only.
+        s.remove_contact("p1", true).unwrap();
+        let rows = s.outbox_for("p1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].msg_id, "sv1");
+        // Expiry covers every kind.
+        assert_eq!(s.outbox_expire(3).unwrap().len(), 1);
+        assert!(s.outbox_for("p1").unwrap().is_empty());
     }
 
     #[test]
@@ -861,9 +1508,34 @@ mod tests {
         s.prune_sessions("p1", 1).unwrap();
         assert_eq!(s.sessions_for("p1").unwrap().len(), 1);
 
-        s.remove_contact("p1").unwrap();
+        s.remove_contact("p1", false).unwrap();
         assert!(s.get_contact("p1").unwrap().is_none());
         assert!(s.list_messages("p1", None, 10).unwrap().is_empty());
         assert!(s.sessions_for("p1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn seq_counters_floor_and_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("db"), &KEY).unwrap();
+        assert_eq!(s.seq_next("dm:a").unwrap(), 1);
+        assert_eq!(s.seq_next("dm:a").unwrap(), 2);
+        s.seq_jump("dm:a", 100).unwrap();
+        assert_eq!(s.seq_next("dm:a").unwrap(), 103);
+        s.seq_jump_all(1000).unwrap();
+        assert_eq!(s.seq_next("dm:a").unwrap(), 1104);
+        // New streams start above the floor too.
+        assert_eq!(s.seq_next("dm:b").unwrap(), 1001);
+        // Only the most recent SEQ_SEEN_KEEP are kept; the highest stays.
+        for i in 1..=(SEQ_SEEN_KEEP as u64 + 10) {
+            assert_eq!(s.seq_check("dm", "p", i, b"d").unwrap(), SeqVerdict::Fresh);
+            s.seq_commit("dm", "p", i, b"d").unwrap();
+        }
+        assert_eq!(s.seq_check("dm", "p", 1, b"d").unwrap(), SeqVerdict::Stale);
+        assert_eq!(
+            s.seq_check("dm", "p", SEQ_SEEN_KEEP as u64 + 10, b"d")
+                .unwrap(),
+            SeqVerdict::Duplicate
+        );
     }
 }

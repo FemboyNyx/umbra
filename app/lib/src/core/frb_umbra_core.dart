@@ -223,6 +223,7 @@ app.ContactCard _card(rust.ContactCard card) {
     ed25519Key: card.ed25519Key,
     addrs: card.addrs,
     displayName: card.displayName,
+    sig: card.sig,
   );
 }
 
@@ -233,6 +234,7 @@ rust.ContactCard _rustCard(app.ContactCard card) {
     ed25519Key: card.ed25519Key,
     addrs: card.addrs,
     displayName: card.displayName,
+    sig: card.sig,
   );
 }
 
@@ -325,5 +327,6 @@ app.KeyChangeSource _source(rust.KeyChangeSource source) {
     rust.KeyChangeSource.hello => app.KeyChangeSource.hello,
     rust.KeyChangeSource.keyClaim => app.KeyChangeSource.keyClaim,
     rust.KeyChangeSource.contactCard => app.KeyChangeSource.contactCard,
+    rust.KeyChangeSource.roster => app.KeyChangeSource.roster,
   };
 }

@@ -19,7 +19,7 @@ enum SignalKind {
 }
 
 /// Where a changed identity key was seen.
-enum KeyChangeSource { hello, keyClaim, contactCard }
+enum KeyChangeSource { hello, keyClaim, contactCard, roster }
 
 /// Wire names from `core` `SignalKind` (`Offer`, `Answer`, …).
 ///
@@ -101,6 +101,7 @@ class ContactCard {
     required this.ed25519Key,
     required this.addrs,
     this.displayName,
+    this.sig,
   });
 
   final String peerId;
@@ -108,6 +109,10 @@ class ContactCard {
   final String ed25519Key;
   final List<String> addrs;
   final String? displayName;
+
+  /// Card v2 signature (QR `sig=`). Opaque to the app: pass it back to core
+  /// unchanged so core can verify the card on import.
+  final String? sig;
 
   String get label {
     final name = displayName?.trim();

@@ -61,6 +61,11 @@ pub struct ContactCard {
     pub addrs: Vec<String>,
     /// Optional display name (`name=` query param).
     pub display_name: Option<String>,
+    /// Card v2: `ed25519_sign(ed, "umbra-card-v2" || PeerId bytes || ik)`,
+    /// unpadded base64. `None` on legacy (v1) cards. Core verifies it
+    /// wherever a card is accepted and rejects the card if it is invalid.
+    #[serde(default)]
+    pub sig: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +88,9 @@ pub struct Contact {
     pub key_changed: bool,
     /// The untrusted new identity key, if `key_changed`.
     pub pending_identity_key: Option<String>,
+    /// We hold a valid card v2 signature binding `identity_key` to the
+    /// device key. Legacy contacts become signed on their next `Hello`.
+    pub signed_card: bool,
 }
 
 /// Where a changed identity key was seen.
@@ -94,6 +102,8 @@ pub enum KeyChangeSource {
     KeyClaim,
     /// A scanned QR / contact card passed to `add_contact`.
     ContactCard,
+    /// A server roster entry (co-member card) for this peer.
+    Roster,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
