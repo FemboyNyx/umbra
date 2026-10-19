@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 use crate::api::types::{Contact, ConversationSummary, DeliveryStatus, Message};
 use crate::engine::proto::EnvelopeMeta;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -103,11 +103,95 @@ CREATE TABLE IF NOT EXISTS seq_out (
     stream TEXT PRIMARY KEY,
     next   INTEGER NOT NULL
 );
+-- v5: servers Phase 1, server model (docs/servers.md "Membership, roles and
+-- moderation"). Signed manifests and roster ops are the source of truth and
+-- are kept as the exact signed bytes; `server_channels` / `server_roles` are
+-- the effective state, rebuilt whenever it changes.
+CREATE TABLE IF NOT EXISTS servers (
+    server_id  TEXT PRIMARY KEY,
+    owner_key  BLOB,                -- K_S secret, only on the owner's device
+    anchor_key TEXT NOT NULL,       -- owner key we first trusted (genesis or invite)
+    frozen_seq INTEGER,             -- set when a fork was seen: read-only
+    removed    TEXT,                -- 'kicked' | 'banned' | 'left'
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS manifests (
+    server_id   TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    hash        TEXT NOT NULL,
+    bytes       BLOB NOT NULL,
+    sig         BLOB NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (server_id, seq)
+);
+-- Conflicting manifests for a seq we already have (evidence of a fork).
+CREATE TABLE IF NOT EXISTS manifest_forks (
+    server_id TEXT NOT NULL,
+    hash      TEXT NOT NULL,
+    seq       INTEGER NOT NULL,
+    bytes     BLOB NOT NULL,
+    sig       BLOB NOT NULL,
+    PRIMARY KEY (server_id, hash)
+);
+CREATE TABLE IF NOT EXISTS roster_ops (
+    server_id   TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    base_seq    INTEGER NOT NULL,
+    bytes       BLOB NOT NULL,
+    sig         BLOB NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (server_id, hash)
+);
+CREATE TABLE IF NOT EXISTS server_channels (
+    server_id  TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    channel    BLOB NOT NULL,       -- CBOR server_model::Channel
+    PRIMARY KEY (server_id, channel_id)
+);
+CREATE TABLE IF NOT EXISTS server_roles (
+    server_id TEXT NOT NULL,
+    peer_id   TEXT NOT NULL,
+    role      TEXT NOT NULL,        -- 'owner' | 'admin' | 'member'
+    PRIMARY KEY (server_id, peer_id)
+);
+-- Invites we created (the secret never leaves this device except in the link).
+CREATE TABLE IF NOT EXISTS server_invites (
+    invite_id      TEXT PRIMARY KEY,
+    server_id      TEXT NOT NULL,
+    secret         BLOB NOT NULL,
+    signed         BLOB NOT NULL,   -- CBOR SignedInvite
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    max_uses       INTEGER NOT NULL,
+    uses           INTEGER NOT NULL DEFAULT 0,
+    needs_approval INTEGER NOT NULL,
+    revoked        INTEGER NOT NULL DEFAULT 0
+);
+-- JoinHellos waiting for approval (invites with needs_approval).
+CREATE TABLE IF NOT EXISTS join_requests (
+    server_id TEXT NOT NULL,
+    peer_id   TEXT NOT NULL,
+    invite_id TEXT NOT NULL,
+    card      TEXT NOT NULL,        -- JSON ContactCard
+    ts        INTEGER NOT NULL,
+    PRIMARY KEY (server_id, peer_id)
+);
+-- Servers we are joining: the signed invite until the first manifest arrives.
+CREATE TABLE IF NOT EXISTS pending_joins (
+    server_id TEXT PRIMARY KEY,
+    invite    BLOB NOT NULL,        -- CBOR SignedInvite
+    ts        INTEGER NOT NULL
+);
 "#;
 
 pub struct Store {
     conn: Mutex<Connection>,
 }
+
+#[path = "store_servers.rs"]
+mod store_servers;
+pub use store_servers::*;
 
 /// Outcome of checking a `(stream, sender, seq)` against what was accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +436,6 @@ impl Store {
         conn.execute_batch(
             "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;",
         )?;
-        conn.execute_batch(SCHEMA)?;
         let mut conn = conn;
         migrate(&mut conn)?;
         Ok(Self {
@@ -1182,6 +1265,9 @@ const ADDED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 /// not depend on the recorded version being accurate.
 fn migrate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
+    // New tables (all `IF NOT EXISTS`) are created inside the same
+    // transaction, so a v5 migration that fails leaves no v5 tables behind.
+    tx.execute_batch(SCHEMA)?;
     let v: i64 = tx
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -1537,5 +1623,100 @@ mod tests {
                 .unwrap(),
             SeqVerdict::Duplicate
         );
+    }
+
+    #[test]
+    fn v5_server_tables_migrate_transactionally_and_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v4.db");
+        let tables = |s: &Store| -> Vec<String> {
+            let c = s.conn_for_test();
+            let mut st = c
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .unwrap();
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            v
+        };
+        {
+            // A v4 database: drop the v5 tables and roll the version back.
+            let s = Store::open(&path, &KEY).unwrap();
+            s.conn_for_test()
+                .execute_batch(
+                    "DROP TABLE servers; DROP TABLE manifests; DROP TABLE manifest_forks;
+                     DROP TABLE roster_ops; DROP TABLE server_channels; DROP TABLE server_roles;
+                     DROP TABLE server_invites; DROP TABLE join_requests; DROP TABLE pending_joins;
+                     UPDATE meta SET value = X'34' WHERE key = 'schema_version';",
+                )
+                .unwrap();
+            assert!(!tables(&s).contains(&"servers".to_string()));
+        }
+        for _ in 0..2 {
+            let s = Store::open(&path, &KEY).unwrap();
+            let t = tables(&s);
+            for want in [
+                "servers",
+                "manifests",
+                "roster_ops",
+                "server_channels",
+                "server_invites",
+                "pending_joins",
+            ] {
+                assert!(t.contains(&want.to_string()), "{want}");
+            }
+            assert_eq!(
+                s.meta_get_i64("schema_version").unwrap(),
+                Some(SCHEMA_VERSION)
+            );
+        }
+        // A newer schema refuses to open and creates nothing.
+        let s = Store::open(&path, &KEY).unwrap();
+        s.conn_for_test()
+            .execute_batch("DROP TABLE pending_joins; UPDATE meta SET value = X'39' WHERE key = 'schema_version';")
+            .unwrap();
+        drop(s);
+        assert!(Store::open(&path, &KEY).is_err());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex::encode(KEY)))
+            .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'pending_joins'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "the failed migration rolled back its CREATE TABLEs");
+    }
+
+    #[test]
+    fn invites_are_used_up_atomically() {
+        use crate::engine::server_model::SignedInvite;
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("db"), &KEY).unwrap();
+        s.invite_put(&InviteRow {
+            invite_id: "i".into(),
+            server_id: "srv".into(),
+            secret: vec![1; 32],
+            signed: SignedInvite {
+                bytes: vec![1],
+                sig: vec![2],
+            },
+            created_at: 0,
+            expires_at: 100,
+            max_uses: 2,
+            uses: 0,
+            needs_approval: false,
+            revoked: false,
+        })
+        .unwrap();
+        assert!(!s.invite_take_use("i", 100).unwrap(), "expired");
+        assert!(s.invite_take_use("i", 50).unwrap());
+        assert!(s.invite_take_use("i", 50).unwrap());
+        assert!(!s.invite_take_use("i", 50).unwrap(), "used up");
+        assert_eq!(s.invite_get("i").unwrap().unwrap().uses, 2);
     }
 }

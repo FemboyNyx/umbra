@@ -49,6 +49,8 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 sha2 = "0.10"
 hkdf = "0.12"
+hmac = "0.12"
+ciborium = "0.2"
 url = "2"
 hex = "0.4"
 tracing = "0.1"

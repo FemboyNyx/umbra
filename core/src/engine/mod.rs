@@ -8,6 +8,7 @@ pub mod proto;
 pub mod qr;
 pub mod replay;
 pub mod safety;
+pub mod server_model;
 pub mod servers;
 pub mod socks;
 pub mod store;

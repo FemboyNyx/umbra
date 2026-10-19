@@ -6887,10 +6887,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "ciborium",
  "flutter_rust_bridge",
  "futures",
  "hex",
  "hkdf 0.12.4",
+ "hmac 0.12.1",
  "libp2p",
  "rusqlite",
  "serde",
