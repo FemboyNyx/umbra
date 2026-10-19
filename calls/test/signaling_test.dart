@@ -21,12 +21,30 @@ void main() {
     expect(SignalKind.iceCandidate.wire, 'IceCandidate');
   });
 
+  test('fromCore builds trusted signal', () {
+    final msg = CallSignalMessage.fromCore(
+      peerId: 'remote',
+      localPeerId: 'local',
+      callId: 'c1',
+      kindWire: 'Offer',
+      payload: {'sdp': 'v=0', 'sdpType': 'offer', 'media': 'audio'},
+    );
+    expect(msg!.kind, SignalKind.offer);
+    expect(msg.fromPeerId, 'remote');
+    expect(msg.toPeerId, 'local');
+    expect(msg.sdp, 'v=0');
+  });
+
   test('relay-only policy', () {
     final blocked = IceConfig(relayPolicy: CallRelayPolicy.relayOnly);
     expect(blocked.relayOnlyBlocked, isTrue);
     final ok = IceConfig(
       turnServers: const [
-        IceServer(urls: ['turn:example.invalid:3478'], username: 'u', credential: 'p'),
+        IceServer(
+          urls: ['turn:example.invalid:3478'],
+          username: 'u',
+          credential: 'p',
+        ),
       ],
       relayPolicy: CallRelayPolicy.relayOnly,
     );
