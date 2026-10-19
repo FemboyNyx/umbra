@@ -103,6 +103,8 @@ If Umbra uses only **standard, published** algorithms/protocols (e.g. well-known
 
 Umbra the project runs no hosts, index or relay nodes ([servers.md](servers.md), "Nothing depends on a node we run"). The person who runs a host is that host's operator. Writing and publishing the software is a separate question that this section doesn't cover.
 
+**Server hosts in the design.** How `umbra-host` implements what this section asks for (published contact, onboarding warnings and AUP, blob and peer denylists, preservation holds, takedown notices, logging off by default) is in [servers.md, Operator duties](servers.md#operator-duties-legal-driven-phase-1). Syd reviews that design against this section.
+
 **What a blind host can and can't see.** This drives everything below. It **can't** read messages, files, channel names, server names or rosters. It **does** hold member PeerIds (from its `HostGrant`), connecting IP addresses (unless the member uses Tor), timestamps, envelope and blob sizes, which PeerId pushes and fetches what, who sends Olm relays to whom, `ServerId`s, and `BlobId`s (SHA-256 of each ciphertext chunk). A **member host** is different: it reads everything it holds keys for, so for legal purposes it should be treated like any other member who can see the content.
 
 ### 4.1 Host operator liability
