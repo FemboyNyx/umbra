@@ -260,7 +260,7 @@ async fn co_members_deliver_server_payloads_via_outbox() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn invite_join_and_kick_over_the_network() {
     init_tracing();
-    let mut a = node(11, "Alice").await;
+    let a = node(11, "Alice").await;
     let mut b = node(12, "Bob").await;
     let sid = a
         .core
