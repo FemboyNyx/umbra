@@ -55,7 +55,7 @@ extension CoreEventPatterns on CoreEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( CoreEvent_MessageReceived value)?  messageReceived,TResult Function( CoreEvent_MessageStatus value)?  messageStatus,TResult Function( CoreEvent_ContactOnline value)?  contactOnline,TResult Function( CoreEvent_ContactOffline value)?  contactOffline,TResult Function( CoreEvent_ContactRequest value)?  contactRequest,TResult Function( CoreEvent_Signal value)?  signal,TResult Function( CoreEvent_NetworkStatus value)?  networkStatus,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( CoreEvent_MessageReceived value)?  messageReceived,TResult Function( CoreEvent_MessageStatus value)?  messageStatus,TResult Function( CoreEvent_ContactOnline value)?  contactOnline,TResult Function( CoreEvent_ContactOffline value)?  contactOffline,TResult Function( CoreEvent_ContactRequest value)?  contactRequest,TResult Function( CoreEvent_Signal value)?  signal,TResult Function( CoreEvent_NetworkStatus value)?  networkStatus,TResult Function( CoreEvent_KeyChanged value)?  keyChanged,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case CoreEvent_MessageReceived() when messageReceived != null:
@@ -65,7 +65,8 @@ return contactOnline(_that);case CoreEvent_ContactOffline() when contactOffline 
 return contactOffline(_that);case CoreEvent_ContactRequest() when contactRequest != null:
 return contactRequest(_that);case CoreEvent_Signal() when signal != null:
 return signal(_that);case CoreEvent_NetworkStatus() when networkStatus != null:
-return networkStatus(_that);case _:
+return networkStatus(_that);case CoreEvent_KeyChanged() when keyChanged != null:
+return keyChanged(_that);case _:
   return orElse();
 
 }
@@ -83,7 +84,7 @@ return networkStatus(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( CoreEvent_MessageReceived value)  messageReceived,required TResult Function( CoreEvent_MessageStatus value)  messageStatus,required TResult Function( CoreEvent_ContactOnline value)  contactOnline,required TResult Function( CoreEvent_ContactOffline value)  contactOffline,required TResult Function( CoreEvent_ContactRequest value)  contactRequest,required TResult Function( CoreEvent_Signal value)  signal,required TResult Function( CoreEvent_NetworkStatus value)  networkStatus,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( CoreEvent_MessageReceived value)  messageReceived,required TResult Function( CoreEvent_MessageStatus value)  messageStatus,required TResult Function( CoreEvent_ContactOnline value)  contactOnline,required TResult Function( CoreEvent_ContactOffline value)  contactOffline,required TResult Function( CoreEvent_ContactRequest value)  contactRequest,required TResult Function( CoreEvent_Signal value)  signal,required TResult Function( CoreEvent_NetworkStatus value)  networkStatus,required TResult Function( CoreEvent_KeyChanged value)  keyChanged,}){
 final _that = this;
 switch (_that) {
 case CoreEvent_MessageReceived():
@@ -93,7 +94,8 @@ return contactOnline(_that);case CoreEvent_ContactOffline():
 return contactOffline(_that);case CoreEvent_ContactRequest():
 return contactRequest(_that);case CoreEvent_Signal():
 return signal(_that);case CoreEvent_NetworkStatus():
-return networkStatus(_that);}
+return networkStatus(_that);case CoreEvent_KeyChanged():
+return keyChanged(_that);}
 }
 /// A variant of `map` that fallback to returning `null`.
 ///
@@ -107,7 +109,7 @@ return networkStatus(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( CoreEvent_MessageReceived value)?  messageReceived,TResult? Function( CoreEvent_MessageStatus value)?  messageStatus,TResult? Function( CoreEvent_ContactOnline value)?  contactOnline,TResult? Function( CoreEvent_ContactOffline value)?  contactOffline,TResult? Function( CoreEvent_ContactRequest value)?  contactRequest,TResult? Function( CoreEvent_Signal value)?  signal,TResult? Function( CoreEvent_NetworkStatus value)?  networkStatus,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( CoreEvent_MessageReceived value)?  messageReceived,TResult? Function( CoreEvent_MessageStatus value)?  messageStatus,TResult? Function( CoreEvent_ContactOnline value)?  contactOnline,TResult? Function( CoreEvent_ContactOffline value)?  contactOffline,TResult? Function( CoreEvent_ContactRequest value)?  contactRequest,TResult? Function( CoreEvent_Signal value)?  signal,TResult? Function( CoreEvent_NetworkStatus value)?  networkStatus,TResult? Function( CoreEvent_KeyChanged value)?  keyChanged,}){
 final _that = this;
 switch (_that) {
 case CoreEvent_MessageReceived() when messageReceived != null:
@@ -117,7 +119,8 @@ return contactOnline(_that);case CoreEvent_ContactOffline() when contactOffline 
 return contactOffline(_that);case CoreEvent_ContactRequest() when contactRequest != null:
 return contactRequest(_that);case CoreEvent_Signal() when signal != null:
 return signal(_that);case CoreEvent_NetworkStatus() when networkStatus != null:
-return networkStatus(_that);case _:
+return networkStatus(_that);case CoreEvent_KeyChanged() when keyChanged != null:
+return keyChanged(_that);case _:
   return null;
 
 }
@@ -134,7 +137,7 @@ return networkStatus(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( Message message)?  messageReceived,TResult Function( String id,  String peerId,  DeliveryStatus status)?  messageStatus,TResult Function( String peerId)?  contactOnline,TResult Function( String peerId)?  contactOffline,TResult Function( ContactCard card)?  contactRequest,TResult Function( String peerId,  String callId,  SignalKind kind,  String payload)?  signal,TResult Function( NetworkInfo info)?  networkStatus,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( Message message)?  messageReceived,TResult Function( String id,  String peerId,  DeliveryStatus status)?  messageStatus,TResult Function( String peerId)?  contactOnline,TResult Function( String peerId)?  contactOffline,TResult Function( ContactCard card)?  contactRequest,TResult Function( String peerId,  String callId,  SignalKind kind,  String payload)?  signal,TResult Function( NetworkInfo info)?  networkStatus,TResult Function( String peerId,  String oldIdentityKey,  String newIdentityKey,  String oldSafetyNumber,  String newSafetyNumber,  KeyChangeSource source)?  keyChanged,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case CoreEvent_MessageReceived() when messageReceived != null:
 return messageReceived(_that.message);case CoreEvent_MessageStatus() when messageStatus != null:
@@ -143,7 +146,8 @@ return contactOnline(_that.peerId);case CoreEvent_ContactOffline() when contactO
 return contactOffline(_that.peerId);case CoreEvent_ContactRequest() when contactRequest != null:
 return contactRequest(_that.card);case CoreEvent_Signal() when signal != null:
 return signal(_that.peerId,_that.callId,_that.kind,_that.payload);case CoreEvent_NetworkStatus() when networkStatus != null:
-return networkStatus(_that.info);case _:
+return networkStatus(_that.info);case CoreEvent_KeyChanged() when keyChanged != null:
+return keyChanged(_that.peerId,_that.oldIdentityKey,_that.newIdentityKey,_that.oldSafetyNumber,_that.newSafetyNumber,_that.source);case _:
   return orElse();
 
 }
@@ -161,7 +165,7 @@ return networkStatus(_that.info);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( Message message)  messageReceived,required TResult Function( String id,  String peerId,  DeliveryStatus status)  messageStatus,required TResult Function( String peerId)  contactOnline,required TResult Function( String peerId)  contactOffline,required TResult Function( ContactCard card)  contactRequest,required TResult Function( String peerId,  String callId,  SignalKind kind,  String payload)  signal,required TResult Function( NetworkInfo info)  networkStatus,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( Message message)  messageReceived,required TResult Function( String id,  String peerId,  DeliveryStatus status)  messageStatus,required TResult Function( String peerId)  contactOnline,required TResult Function( String peerId)  contactOffline,required TResult Function( ContactCard card)  contactRequest,required TResult Function( String peerId,  String callId,  SignalKind kind,  String payload)  signal,required TResult Function( NetworkInfo info)  networkStatus,required TResult Function( String peerId,  String oldIdentityKey,  String newIdentityKey,  String oldSafetyNumber,  String newSafetyNumber,  KeyChangeSource source)  keyChanged,}) {final _that = this;
 switch (_that) {
 case CoreEvent_MessageReceived():
 return messageReceived(_that.message);case CoreEvent_MessageStatus():
@@ -170,7 +174,8 @@ return contactOnline(_that.peerId);case CoreEvent_ContactOffline():
 return contactOffline(_that.peerId);case CoreEvent_ContactRequest():
 return contactRequest(_that.card);case CoreEvent_Signal():
 return signal(_that.peerId,_that.callId,_that.kind,_that.payload);case CoreEvent_NetworkStatus():
-return networkStatus(_that.info);}
+return networkStatus(_that.info);case CoreEvent_KeyChanged():
+return keyChanged(_that.peerId,_that.oldIdentityKey,_that.newIdentityKey,_that.oldSafetyNumber,_that.newSafetyNumber,_that.source);}
 }
 /// A variant of `when` that fallback to returning `null`
 ///
@@ -184,7 +189,7 @@ return networkStatus(_that.info);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( Message message)?  messageReceived,TResult? Function( String id,  String peerId,  DeliveryStatus status)?  messageStatus,TResult? Function( String peerId)?  contactOnline,TResult? Function( String peerId)?  contactOffline,TResult? Function( ContactCard card)?  contactRequest,TResult? Function( String peerId,  String callId,  SignalKind kind,  String payload)?  signal,TResult? Function( NetworkInfo info)?  networkStatus,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( Message message)?  messageReceived,TResult? Function( String id,  String peerId,  DeliveryStatus status)?  messageStatus,TResult? Function( String peerId)?  contactOnline,TResult? Function( String peerId)?  contactOffline,TResult? Function( ContactCard card)?  contactRequest,TResult? Function( String peerId,  String callId,  SignalKind kind,  String payload)?  signal,TResult? Function( NetworkInfo info)?  networkStatus,TResult? Function( String peerId,  String oldIdentityKey,  String newIdentityKey,  String oldSafetyNumber,  String newSafetyNumber,  KeyChangeSource source)?  keyChanged,}) {final _that = this;
 switch (_that) {
 case CoreEvent_MessageReceived() when messageReceived != null:
 return messageReceived(_that.message);case CoreEvent_MessageStatus() when messageStatus != null:
@@ -193,7 +198,8 @@ return contactOnline(_that.peerId);case CoreEvent_ContactOffline() when contactO
 return contactOffline(_that.peerId);case CoreEvent_ContactRequest() when contactRequest != null:
 return contactRequest(_that.card);case CoreEvent_Signal() when signal != null:
 return signal(_that.peerId,_that.callId,_that.kind,_that.payload);case CoreEvent_NetworkStatus() when networkStatus != null:
-return networkStatus(_that.info);case _:
+return networkStatus(_that.info);case CoreEvent_KeyChanged() when keyChanged != null:
+return keyChanged(_that.peerId,_that.oldIdentityKey,_that.newIdentityKey,_that.oldSafetyNumber,_that.newSafetyNumber,_that.source);case _:
   return null;
 
 }
@@ -667,6 +673,82 @@ class _$CoreEvent_NetworkStatusCopyWithImpl<$Res>
   return _then(CoreEvent_NetworkStatus(
 info: null == info ? _self.info : info // ignore: cast_nullable_to_non_nullable
 as NetworkInfo,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class CoreEvent_KeyChanged extends CoreEvent {
+  const CoreEvent_KeyChanged({required this.peerId, required this.oldIdentityKey, required this.newIdentityKey, required this.oldSafetyNumber, required this.newSafetyNumber, required this.source}): super._();
+  
+
+ final  String peerId;
+ final  String oldIdentityKey;
+ final  String newIdentityKey;
+ final  String oldSafetyNumber;
+ final  String newSafetyNumber;
+ final  KeyChangeSource source;
+
+/// Create a copy of CoreEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$CoreEvent_KeyChangedCopyWith<CoreEvent_KeyChanged> get copyWith => _$CoreEvent_KeyChangedCopyWithImpl<CoreEvent_KeyChanged>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is CoreEvent_KeyChanged&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.oldIdentityKey, oldIdentityKey) || other.oldIdentityKey == oldIdentityKey)&&(identical(other.newIdentityKey, newIdentityKey) || other.newIdentityKey == newIdentityKey)&&(identical(other.oldSafetyNumber, oldSafetyNumber) || other.oldSafetyNumber == oldSafetyNumber)&&(identical(other.newSafetyNumber, newSafetyNumber) || other.newSafetyNumber == newSafetyNumber)&&(identical(other.source, source) || other.source == source));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,peerId,oldIdentityKey,newIdentityKey,oldSafetyNumber,newSafetyNumber,source);
+
+@override
+String toString() {
+  return 'CoreEvent.keyChanged(peerId: $peerId, oldIdentityKey: $oldIdentityKey, newIdentityKey: $newIdentityKey, oldSafetyNumber: $oldSafetyNumber, newSafetyNumber: $newSafetyNumber, source: $source)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $CoreEvent_KeyChangedCopyWith<$Res> implements $CoreEventCopyWith<$Res> {
+  factory $CoreEvent_KeyChangedCopyWith(CoreEvent_KeyChanged value, $Res Function(CoreEvent_KeyChanged) _then) = _$CoreEvent_KeyChangedCopyWithImpl;
+@useResult
+$Res call({
+ String peerId, String oldIdentityKey, String newIdentityKey, String oldSafetyNumber, String newSafetyNumber, KeyChangeSource source
+});
+
+
+
+
+}
+/// @nodoc
+class _$CoreEvent_KeyChangedCopyWithImpl<$Res>
+    implements $CoreEvent_KeyChangedCopyWith<$Res> {
+  _$CoreEvent_KeyChangedCopyWithImpl(this._self, this._then);
+
+  final CoreEvent_KeyChanged _self;
+  final $Res Function(CoreEvent_KeyChanged) _then;
+
+/// Create a copy of CoreEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? peerId = null,Object? oldIdentityKey = null,Object? newIdentityKey = null,Object? oldSafetyNumber = null,Object? newSafetyNumber = null,Object? source = null,}) {
+  return _then(CoreEvent_KeyChanged(
+peerId: null == peerId ? _self.peerId : peerId // ignore: cast_nullable_to_non_nullable
+as String,oldIdentityKey: null == oldIdentityKey ? _self.oldIdentityKey : oldIdentityKey // ignore: cast_nullable_to_non_nullable
+as String,newIdentityKey: null == newIdentityKey ? _self.newIdentityKey : newIdentityKey // ignore: cast_nullable_to_non_nullable
+as String,oldSafetyNumber: null == oldSafetyNumber ? _self.oldSafetyNumber : oldSafetyNumber // ignore: cast_nullable_to_non_nullable
+as String,newSafetyNumber: null == newSafetyNumber ? _self.newSafetyNumber : newSafetyNumber // ignore: cast_nullable_to_non_nullable
+as String,source: null == source ? _self.source : source // ignore: cast_nullable_to_non_nullable
+as KeyChangeSource,
   ));
 }
 

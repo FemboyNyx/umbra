@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../state/umbra_controller.dart';
 import '../theme/umbra_theme.dart';
+import 'key_change_banner.dart';
 
 class ContactDetailScreen extends StatelessWidget {
   const ContactDetailScreen({
@@ -34,6 +35,9 @@ class ContactDetailScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
         children: [
+          for (final notice in controller.keyChangeNotices)
+            if (notice.peerId == peerId)
+              KeyChangeBanner(controller: controller, notice: notice),
           Text(contact.displayName, style: theme.textTheme.headlineSmall),
           const SizedBox(height: 4),
           Text(

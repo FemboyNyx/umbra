@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'types.freezed.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `hash`, `hash`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `hash`, `hash`, `hash`
 
 class Contact {
   final String peerId;
@@ -28,6 +28,13 @@ class Contact {
   /// Currently connected (best effort).
   final bool online;
 
+  /// This contact presented a different identity key that is NOT trusted
+  /// yet (see `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change`).
+  final bool keyChanged;
+
+  /// The untrusted new identity key, if `key_changed`.
+  final String? pendingIdentityKey;
+
   const Contact({
     required this.peerId,
     required this.displayName,
@@ -38,6 +45,8 @@ class Contact {
     required this.safetyNumber,
     required this.addedAtMs,
     required this.online,
+    required this.keyChanged,
+    this.pendingIdentityKey,
   });
 
   @override
@@ -50,7 +59,9 @@ class Contact {
       verified.hashCode ^
       safetyNumber.hashCode ^
       addedAtMs.hashCode ^
-      online.hashCode;
+      online.hashCode ^
+      keyChanged.hashCode ^
+      pendingIdentityKey.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -65,7 +76,9 @@ class Contact {
           verified == other.verified &&
           safetyNumber == other.safetyNumber &&
           addedAtMs == other.addedAtMs &&
-          online == other.online;
+          online == other.online &&
+          keyChanged == other.keyChanged &&
+          pendingIdentityKey == other.pendingIdentityKey;
 }
 
 /// A contact as read from a QR code / link or received in a contact request.
@@ -234,6 +247,20 @@ sealed class CoreEvent with _$CoreEvent {
   }) = CoreEvent_Signal;
   const factory CoreEvent.networkStatus({required NetworkInfo info}) =
       CoreEvent_NetworkStatus;
+
+  /// A known contact presented a different identity key. The new key is
+  /// rejected and NOT trusted; messages keep using the old key. The contact
+  /// is flagged (`Contact.key_changed`) until the app calls
+  /// `accept_key_change` or `reject_key_change`. Emitted once per distinct
+  /// new key.
+  const factory CoreEvent.keyChanged({
+    required String peerId,
+    required String oldIdentityKey,
+    required String newIdentityKey,
+    required String oldSafetyNumber,
+    required String newSafetyNumber,
+    required KeyChangeSource source,
+  }) = CoreEvent_KeyChanged;
 }
 
 enum DeliveryStatus {
@@ -248,6 +275,18 @@ enum DeliveryStatus {
 
   /// Incoming message.
   received,
+}
+
+/// Where a changed identity key was seen.
+enum KeyChangeSource {
+  /// The peer's `Hello` on a new connection.
+  hello,
+
+  /// The peer's answer to a one-time-key claim.
+  keyClaim,
+
+  /// A scanned QR / contact card passed to `add_contact`.
+  contactCard,
 }
 
 class Message {
@@ -389,4 +428,21 @@ class SelfInfo {
 }
 
 /// Call signaling message kinds, carried encrypted by core for `calls/`.
-enum SignalKind { offer, answer, iceCandidate, hangup, ringing, reject }
+///
+/// Wire names are the variant names (`"Offer"`, …, `"Accept"`, `"Busy"`) and
+/// must match `calls/lib/src/signaling.dart` (`SignalKindWire.wire`).
+/// New variants go at the end.
+enum SignalKind {
+  offer,
+  answer,
+  iceCandidate,
+  hangup,
+  ringing,
+  reject,
+
+  /// Callee accepted a `Ringing`; the caller sends `Offer` next.
+  accept,
+
+  /// Callee is already in a call.
+  busy,
+}

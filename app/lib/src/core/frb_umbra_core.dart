@@ -97,6 +97,15 @@ class FrbUmbraCore implements UmbraCore {
       _guard(() => rust_api.setVerified(peerId: peerId, verified: verified));
 
   @override
+  Future<app.Contact> acceptKeyChange(String peerId) => _guard(
+    () async => _contact(await rust_api.acceptKeyChange(peerId: peerId)),
+  );
+
+  @override
+  Future<void> rejectKeyChange(String peerId) =>
+      _guard(() => rust_api.rejectKeyChange(peerId: peerId));
+
+  @override
   Future<void> removeContact(String peerId) =>
       _guard(() => rust_api.removeContact(peerId: peerId));
 
@@ -176,6 +185,22 @@ app.CoreEvent _event(rust.CoreEvent event) {
       payload: payload,
     ),
     networkStatus: (info) => app.NetworkStatus(_network(info)),
+    keyChanged:
+        (
+          peerId,
+          oldIdentityKey,
+          newIdentityKey,
+          oldSafetyNumber,
+          newSafetyNumber,
+          source,
+        ) => app.KeyChanged(
+          peerId: peerId,
+          oldIdentityKey: oldIdentityKey,
+          newIdentityKey: newIdentityKey,
+          oldSafetyNumber: oldSafetyNumber,
+          newSafetyNumber: newSafetyNumber,
+          source: _source(source),
+        ),
   );
 }
 
@@ -222,6 +247,8 @@ app.Contact _contact(rust.Contact contact) {
     safetyNumber: contact.safetyNumber,
     addedAtMs: contact.addedAtMs,
     online: contact.online,
+    keyChanged: contact.keyChanged,
+    pendingIdentityKey: contact.pendingIdentityKey,
   );
 }
 
@@ -275,6 +302,8 @@ app.SignalKind _kind(rust.SignalKind kind) {
     rust.SignalKind.hangup => app.SignalKind.hangup,
     rust.SignalKind.ringing => app.SignalKind.ringing,
     rust.SignalKind.reject => app.SignalKind.reject,
+    rust.SignalKind.accept => app.SignalKind.accept,
+    rust.SignalKind.busy => app.SignalKind.busy,
   };
 }
 
@@ -286,5 +315,15 @@ rust.SignalKind _rustKind(app.SignalKind kind) {
     app.SignalKind.hangup => rust.SignalKind.hangup,
     app.SignalKind.ringing => rust.SignalKind.ringing,
     app.SignalKind.reject => rust.SignalKind.reject,
+    app.SignalKind.accept => rust.SignalKind.accept,
+    app.SignalKind.busy => rust.SignalKind.busy,
+  };
+}
+
+app.KeyChangeSource _source(rust.KeyChangeSource source) {
+  return switch (source) {
+    rust.KeyChangeSource.hello => app.KeyChangeSource.hello,
+    rust.KeyChangeSource.keyClaim => app.KeyChangeSource.keyClaim,
+    rust.KeyChangeSource.contactCard => app.KeyChangeSource.contactCard,
   };
 }

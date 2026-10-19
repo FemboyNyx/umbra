@@ -59,6 +59,7 @@ class PlatformDbKeyStore implements DbKeyStore {
     if (backend is! String || backend.isEmpty) {
       throw StateError('keystore did not name a backend');
     }
-    return DbKeyMaterial(bytes: bytes, backend: backend);
+    // The channel buffer is unmodifiable. Callers wipe the key after `init`.
+    return DbKeyMaterial(bytes: Uint8List.fromList(bytes), backend: backend);
   }
 }

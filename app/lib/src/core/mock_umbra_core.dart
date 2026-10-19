@@ -15,7 +15,7 @@ class MockTiming {
     this.delivered = const Duration(milliseconds: 400),
     this.echoAfterDelivered = const Duration(milliseconds: 600),
     this.ringing = const Duration(milliseconds: 300),
-    this.answer = const Duration(milliseconds: 1200),
+    this.answer = const Duration(milliseconds: 600),
     this.hangupEcho = const Duration(milliseconds: 100),
   });
 
@@ -23,7 +23,11 @@ class MockTiming {
   final Duration onlineAfterAdd;
   final Duration delivered;
   final Duration echoAfterDelivered;
+
+  /// Delay before a `Ringing` is answered with `Accept`.
   final Duration ringing;
+
+  /// Delay before an `Offer` is answered with `Answer`.
   final Duration answer;
   final Duration hangupEcho;
 
@@ -41,8 +45,13 @@ class MockTiming {
 /// In-memory stand-in for `CoreConfig { mock: true }`.
 ///
 /// Same visible behavior as `core/src/mock.rs`: a Mock Bot request, echo
-/// replies, and a fake call answer. No disk and no network. Cryptographic
-/// QR checks stay in Rust; [parseQr] here only checks the link shape.
+/// replies, and a fake call answer (`Ringing` → `Accept`, `Offer` → `Answer`).
+/// No disk and no network. Cryptographic QR checks stay in Rust; [parseQr]
+/// here only checks the link shape.
+///
+/// The Rust mock rejects every key change because it never stores a pending
+/// key. This stand-in stores one so the safety-number warning can be tried
+/// from the UI.
 class MockUmbraCore implements UmbraCore {
   MockUmbraCore({this.timing = const MockTiming()});
 
@@ -71,6 +80,8 @@ class MockUmbraCore implements UmbraCore {
   final List<Contact> _contacts = [];
   final List<Message> _messages = [];
   NetworkInfo _network = const NetworkInfo();
+  final Map<String, String> _pendingSafety = {};
+  final Map<String, String> _rejectedKeys = {};
   void Function(CoreEvent event)? _listener;
   final List<CoreEvent> _buffered = [];
   var _hasListener = false;
@@ -139,7 +150,7 @@ class MockUmbraCore implements UmbraCore {
         '/ip4/192.0.2.10/tcp/4001',
         '/ip4/192.0.2.10/udp/4001/quic-v1',
       ],
-      connectedPeers: _contacts.length,
+      connectedPeers: _onlineCount,
       relayReservations: 0,
     );
     _emit(NetworkStatus(_network));
@@ -198,6 +209,7 @@ class MockUmbraCore implements UmbraCore {
     );
     _contacts.removeWhere((c) => c.peerId == contact.peerId);
     _contacts.add(contact);
+    _syncOnlinePeers();
     _later(timing.onlineAfterAdd, ContactOnline(contact.peerId));
     return contact;
   }
@@ -217,10 +229,82 @@ class MockUmbraCore implements UmbraCore {
   }
 
   @override
+  Future<Contact> acceptKeyChange(String peerId) async {
+    _requireInit();
+    final index = _pendingIndex(peerId);
+    final current = _contacts[index];
+    final pending = current.pendingIdentityKey!;
+    final safety = _pendingSafety.remove(peerId) ?? current.safetyNumber;
+    _rejectedKeys.remove(peerId);
+    final updated = current.copyWith(
+      identityKey: pending,
+      verified: false,
+      keyChanged: false,
+      pendingIdentityKey: null,
+      safetyNumber: safety,
+    );
+    _contacts[index] = updated;
+    return updated;
+  }
+
+  @override
+  Future<void> rejectKeyChange(String peerId) async {
+    _requireInit();
+    final index = _pendingIndex(peerId);
+    final current = _contacts[index];
+    _rejectedKeys[peerId] = current.pendingIdentityKey!;
+    _pendingSafety.remove(peerId);
+    _contacts[index] = current.copyWith(
+      keyChanged: false,
+      pendingIdentityKey: null,
+    );
+  }
+
+  /// Record a pending identity key and emit [KeyChanged].
+  ///
+  /// A repeat of a key that is already pending or was rejected is ignored,
+  /// matching the real core.
+  void presentKeyChange({
+    required String peerId,
+    required String newIdentityKey,
+    String? newSafetyNumber,
+    KeyChangeSource source = KeyChangeSource.hello,
+  }) {
+    _requireInit();
+    final index = _contacts.indexWhere((c) => c.peerId == peerId);
+    if (index < 0) throw UmbraException('unknown contact $peerId');
+    final current = _contacts[index];
+    if (current.pendingIdentityKey == newIdentityKey ||
+        _rejectedKeys[peerId] == newIdentityKey) {
+      return;
+    }
+    final safety =
+        newSafetyNumber ?? _safety(_fpDigits, _digits(newIdentityKey, 30));
+    _pendingSafety[peerId] = safety;
+    _contacts[index] = current.copyWith(
+      keyChanged: true,
+      pendingIdentityKey: newIdentityKey,
+    );
+    _emit(
+      KeyChanged(
+        peerId: peerId,
+        oldIdentityKey: current.identityKey,
+        newIdentityKey: newIdentityKey,
+        oldSafetyNumber: current.safetyNumber,
+        newSafetyNumber: safety,
+        source: source,
+      ),
+    );
+  }
+
+  @override
   Future<void> removeContact(String peerId) async {
     _requireInit();
     _contacts.removeWhere((c) => c.peerId == peerId);
     _messages.removeWhere((m) => m.peerId == peerId);
+    _pendingSafety.remove(peerId);
+    _rejectedKeys.remove(peerId);
+    _syncOnlinePeers();
   }
 
   @override
@@ -351,16 +435,17 @@ class MockUmbraCore implements UmbraCore {
     _requireInit();
     _requireContact(peerId);
     switch (kind) {
-      case SignalKind.offer:
+      case SignalKind.ringing:
         _later(
           timing.ringing,
           SignalEvent(
             peerId: peerId,
             callId: callId,
-            kind: SignalKind.ringing,
+            kind: SignalKind.accept,
             payload: '',
           ),
         );
+      case SignalKind.offer:
         _later(
           timing.answer,
           SignalEvent(
@@ -382,10 +467,36 @@ class MockUmbraCore implements UmbraCore {
         );
       case SignalKind.answer:
       case SignalKind.iceCandidate:
-      case SignalKind.ringing:
       case SignalKind.reject:
+      case SignalKind.accept:
+      case SignalKind.busy:
         break;
     }
+  }
+
+  int get _onlineCount => _contacts.where((c) => c.online).length;
+
+  void _syncOnlinePeers() {
+    if (!_network.running || _network.connectedPeers == _onlineCount) return;
+    _network = NetworkInfo(
+      running: _network.running,
+      listenAddrs: _network.listenAddrs,
+      connectedPeers: _onlineCount,
+      relayReservations: _network.relayReservations,
+    );
+    _emit(NetworkStatus(_network));
+  }
+
+  int _pendingIndex(String peerId) {
+    final index = _contacts.indexWhere((c) => c.peerId == peerId);
+    if (index < 0) {
+      throw UmbraException('no pending key change for $peerId');
+    }
+    final contact = _contacts[index];
+    if (!contact.keyChanged || contact.pendingIdentityKey == null) {
+      throw UmbraException('no pending key change for $peerId');
+    }
+    return index;
   }
 
   void _requireInit() {
@@ -448,9 +559,16 @@ class MockUmbraCore implements UmbraCore {
     ].join(' ');
   }
 
+  /// Interleave both fingerprints so neither appears as the first 6 groups.
   static String _safety(String ours, String theirs) {
-    final parts = [ours, theirs]..sort();
-    return _group(parts.join(), 12);
+    final ordered = [ours, theirs]..sort();
+    final mixed = StringBuffer();
+    for (var i = 0; i < ordered[0].length; i++) {
+      mixed
+        ..write(ordered[0][i])
+        ..write(ordered[1][i]);
+    }
+    return _group(mixed.toString(), 12);
   }
 
   static int _fnv(String seed) {

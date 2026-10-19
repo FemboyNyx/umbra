@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:umbra_calls/umbra_calls.dart' show torRelayRequiredMessage;
 
 import '../state/umbra_controller.dart';
 import '../theme/umbra_theme.dart';
@@ -132,7 +133,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _InfoRow(
             label: 'Network',
             value: network.running
-                ? 'Running · ${network.connectedPeers} peers'
+                ? 'Running · ${network.connectedPeers} ${network.connectedPeers == 1 ? 'peer' : 'peers'}'
                 : 'Stopped',
           ),
           if (network.listenAddrs.isNotEmpty)
@@ -146,9 +147,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Calls are not routed through Tor. With Tor on, a call reveals your IP address to the other person unless you force a relay.',
+            'In Tor mode, calls are relay-only and stay blocked until a TURN server is configured.',
             style: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
           ),
+          if (controller.callsBlockedByTor) ...[
+            const SizedBox(height: 8),
+            Text(
+              torRelayRequiredMessage,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: UmbraColors.danger,
+                height: 1.4,
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           Text(
             'License: AGPL-3.0-or-later. Private keys stay in the Rust core. This screen only shows decrypted text and public identity material.',

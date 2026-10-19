@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 760417752;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1652846048;
 
 // Section: executor
 
@@ -47,6 +47,41 @@ flutter_rust_bridge::frb_generated_default_handler!();
 
 // Section: wire_funcs
 
+fn wire__crate__api__umbra__accept_key_change_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "accept_key_change",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_peer_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::umbra::accept_key_change(api_peer_id)?;
+                        std::result::Result::Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__umbra__add_contact_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -437,6 +472,41 @@ fn wire__crate__api__umbra__parse_qr_impl(
         },
     )
 }
+fn wire__crate__api__umbra__reject_key_change_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "reject_key_change",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_peer_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::umbra::reject_key_change(api_peer_id)?;
+                        std::result::Result::Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__umbra__remove_contact_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -777,6 +847,8 @@ impl SseDecode for crate::api::types::Contact {
         let mut var_safetyNumber = <String>::sse_decode(deserializer);
         let mut var_addedAtMs = <i64>::sse_decode(deserializer);
         let mut var_online = <bool>::sse_decode(deserializer);
+        let mut var_keyChanged = <bool>::sse_decode(deserializer);
+        let mut var_pendingIdentityKey = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::Contact {
             peer_id: var_peerId,
             display_name: var_displayName,
@@ -787,6 +859,8 @@ impl SseDecode for crate::api::types::Contact {
             safety_number: var_safetyNumber,
             added_at_ms: var_addedAtMs,
             online: var_online,
+            key_changed: var_keyChanged,
+            pending_identity_key: var_pendingIdentityKey,
         };
     }
 }
@@ -900,6 +974,22 @@ impl SseDecode for crate::api::types::CoreEvent {
                 let mut var_info = <crate::api::types::NetworkInfo>::sse_decode(deserializer);
                 return crate::api::types::CoreEvent::NetworkStatus { info: var_info };
             }
+            7 => {
+                let mut var_peerId = <String>::sse_decode(deserializer);
+                let mut var_oldIdentityKey = <String>::sse_decode(deserializer);
+                let mut var_newIdentityKey = <String>::sse_decode(deserializer);
+                let mut var_oldSafetyNumber = <String>::sse_decode(deserializer);
+                let mut var_newSafetyNumber = <String>::sse_decode(deserializer);
+                let mut var_source = <crate::api::types::KeyChangeSource>::sse_decode(deserializer);
+                return crate::api::types::CoreEvent::KeyChanged {
+                    peer_id: var_peerId,
+                    old_identity_key: var_oldIdentityKey,
+                    new_identity_key: var_newIdentityKey,
+                    old_safety_number: var_oldSafetyNumber,
+                    new_safety_number: var_newSafetyNumber,
+                    source: var_source,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -932,6 +1022,19 @@ impl SseDecode for i64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i64::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for crate::api::types::KeyChangeSource {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::types::KeyChangeSource::Hello,
+            1 => crate::api::types::KeyChangeSource::KeyClaim,
+            2 => crate::api::types::KeyChangeSource::ContactCard,
+            _ => unreachable!("Invalid variant for KeyChangeSource: {}", inner),
+        };
     }
 }
 
@@ -1101,6 +1204,8 @@ impl SseDecode for crate::api::types::SignalKind {
             3 => crate::api::types::SignalKind::Hangup,
             4 => crate::api::types::SignalKind::Ringing,
             5 => crate::api::types::SignalKind::Reject,
+            6 => crate::api::types::SignalKind::Accept,
+            7 => crate::api::types::SignalKind::Busy,
             _ => unreachable!("Invalid variant for SignalKind: {}", inner),
         };
     }
@@ -1134,25 +1239,27 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__umbra__add_contact_impl(port, ptr, rust_vec_len, data_len),
-        2 => wire__crate__api__types__core_config_default_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__umbra__events_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__umbra__init_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__umbra__list_contacts_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__umbra__list_conversations_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__umbra__list_messages_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__umbra__mark_read_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__types__network_info_default_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__umbra__network_status_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__umbra__parse_qr_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__umbra__remove_contact_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__umbra__self_info_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__umbra__send_signal_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__umbra__send_text_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__umbra__set_display_name_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__umbra__set_verified_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__umbra__start_network_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__umbra__stop_network_impl(port, ptr, rust_vec_len, data_len),
+        1 => wire__crate__api__umbra__accept_key_change_impl(port, ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__umbra__add_contact_impl(port, ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__types__core_config_default_impl(port, ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__umbra__events_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__umbra__init_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__umbra__list_contacts_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__umbra__list_conversations_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__umbra__list_messages_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__umbra__mark_read_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__types__network_info_default_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__umbra__network_status_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__umbra__parse_qr_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__umbra__reject_key_change_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__umbra__remove_contact_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__umbra__self_info_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__umbra__send_signal_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__umbra__send_text_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__umbra__set_display_name_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__umbra__set_verified_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__umbra__start_network_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__umbra__stop_network_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1184,6 +1291,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::Contact {
             self.safety_number.into_into_dart().into_dart(),
             self.added_at_ms.into_into_dart().into_dart(),
             self.online.into_into_dart().into_dart(),
+            self.key_changed.into_into_dart().into_dart(),
+            self.pending_identity_key.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1307,6 +1416,23 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::CoreEvent {
             crate::api::types::CoreEvent::NetworkStatus { info } => {
                 [6.into_dart(), info.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::types::CoreEvent::KeyChanged {
+                peer_id,
+                old_identity_key,
+                new_identity_key,
+                old_safety_number,
+                new_safety_number,
+                source,
+            } => [
+                7.into_dart(),
+                peer_id.into_into_dart().into_dart(),
+                old_identity_key.into_into_dart().into_dart(),
+                new_identity_key.into_into_dart().into_dart(),
+                old_safety_number.into_into_dart().into_dart(),
+                new_safety_number.into_into_dart().into_dart(),
+                source.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -1341,6 +1467,28 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::types::DeliveryStatus>
     for crate::api::types::DeliveryStatus
 {
     fn into_into_dart(self) -> crate::api::types::DeliveryStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::types::KeyChangeSource {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Hello => 0.into_dart(),
+            Self::KeyClaim => 1.into_dart(),
+            Self::ContactCard => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::types::KeyChangeSource
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::types::KeyChangeSource>
+    for crate::api::types::KeyChangeSource
+{
+    fn into_into_dart(self) -> crate::api::types::KeyChangeSource {
         self
     }
 }
@@ -1421,6 +1569,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::SignalKind {
             Self::Hangup => 3.into_dart(),
             Self::Ringing => 4.into_dart(),
             Self::Reject => 5.into_dart(),
+            Self::Accept => 6.into_dart(),
+            Self::Busy => 7.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -1476,6 +1626,8 @@ impl SseEncode for crate::api::types::Contact {
         <String>::sse_encode(self.safety_number, serializer);
         <i64>::sse_encode(self.added_at_ms, serializer);
         <bool>::sse_encode(self.online, serializer);
+        <bool>::sse_encode(self.key_changed, serializer);
+        <Option<String>>::sse_encode(self.pending_identity_key, serializer);
     }
 }
 
@@ -1559,6 +1711,22 @@ impl SseEncode for crate::api::types::CoreEvent {
                 <i32>::sse_encode(6, serializer);
                 <crate::api::types::NetworkInfo>::sse_encode(info, serializer);
             }
+            crate::api::types::CoreEvent::KeyChanged {
+                peer_id,
+                old_identity_key,
+                new_identity_key,
+                old_safety_number,
+                new_safety_number,
+                source,
+            } => {
+                <i32>::sse_encode(7, serializer);
+                <String>::sse_encode(peer_id, serializer);
+                <String>::sse_encode(old_identity_key, serializer);
+                <String>::sse_encode(new_identity_key, serializer);
+                <String>::sse_encode(old_safety_number, serializer);
+                <String>::sse_encode(new_safety_number, serializer);
+                <crate::api::types::KeyChangeSource>::sse_encode(source, serializer);
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1595,6 +1763,23 @@ impl SseEncode for i64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_i64::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::types::KeyChangeSource {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::types::KeyChangeSource::Hello => 0,
+                crate::api::types::KeyChangeSource::KeyClaim => 1,
+                crate::api::types::KeyChangeSource::ContactCard => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -1725,6 +1910,8 @@ impl SseEncode for crate::api::types::SignalKind {
                 crate::api::types::SignalKind::Hangup => 3,
                 crate::api::types::SignalKind::Ringing => 4,
                 crate::api::types::SignalKind::Reject => 5,
+                crate::api::types::SignalKind::Accept => 6,
+                crate::api::types::SignalKind::Busy => 7,
                 _ => {
                     unimplemented!("");
                 }

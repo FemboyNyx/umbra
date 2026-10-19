@@ -55,6 +55,19 @@ add_subdirectory("runner")
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+set(_WEBRTC_PLUGIN "${CMAKE_CURRENT_SOURCE_DIR}/flutter/ephemeral/.plugin_symlinks/flutter_webrtc")
+if(EXISTS "${_WEBRTC_PLUGIN}/common/cpp/src/flutter_webrtc_base.cc")
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../tool/defer_webrtc_audio.py"
+      "${_WEBRTC_PLUGIN}"
+    RESULT_VARIABLE _defer_webrtc_rc
+  )
+  if(NOT _defer_webrtc_rc EQUAL 0)
+    message(FATAL_ERROR "defer_webrtc_audio.py failed (${_defer_webrtc_rc})")
+  endif()
+endif()
 include(flutter/generated_plugins.cmake)
 
 

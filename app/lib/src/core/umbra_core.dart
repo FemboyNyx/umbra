@@ -37,6 +37,12 @@ abstract class UmbraCore {
 
   Future<void> setVerified(String peerId, {required bool verified});
 
+  /// Trust the pending key. The contact comes back with `verified` false.
+  Future<Contact> acceptKeyChange(String peerId);
+
+  /// Keep the old key and remember the refused one so it does not alert again.
+  Future<void> rejectKeyChange(String peerId);
+
   Future<void> removeContact(String peerId);
 
   Future<String> sendText(String peerId, String body);

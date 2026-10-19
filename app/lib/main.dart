@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:umbra_calls/umbra_calls.dart' as calls;
 
 import 'src/calls/calls_bridge.dart';
 import 'src/core/core_factory.dart';
@@ -20,10 +23,30 @@ Future<void> main() async {
       return dir.path;
     },
   );
-  UmbraCallsBridge? calls;
+  UmbraCallsBridge? bridge;
+  StreamSubscription<calls.MissedCall>? missed;
   controller.attachCalls = (self) {
-    calls = UmbraCallsBridge(core: controller.core, localPeerId: self.peerId);
-    controller.handleCoreSignal = calls!.handleCoreSignal;
+    missed?.cancel();
+    bridge = UmbraCallsBridge(
+      core: controller.core,
+      localPeerId: self.peerId,
+      torMode: controller.settings.torSocks.trim().isNotEmpty,
+    );
+    controller.handleCoreSignal = bridge!.handleCoreSignal;
+    controller.setCallsBlockedByTor(bridge!.controller.callsBlockedByTor);
+    missed = bridge!.controller.missedCalls.listen((call) {
+      controller.noteMissedCall(
+        peerId: call.peerId,
+        callId: call.callId,
+        reason: call.reason,
+      );
+    });
+  };
+  controller.applyTorMode = (enabled) {
+    final current = bridge;
+    if (current == null) return;
+    current.setTorMode(enabled);
+    controller.setCallsBlockedByTor(current.controller.callsBlockedByTor);
   };
   runApp(UmbraApp(controller: controller));
 }

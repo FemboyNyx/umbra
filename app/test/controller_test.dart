@@ -1,12 +1,19 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:umbra/src/core/core_errors.dart';
 import 'package:umbra/src/core/mock_umbra_core.dart';
 import 'package:umbra/src/core/umbra_core.dart';
 import 'package:umbra/src/keystore/db_key_store.dart';
 import 'package:umbra/src/models/core_types.dart';
 import 'package:umbra/src/settings/settings_store.dart';
 import 'package:umbra/src/state/umbra_controller.dart';
+
+Future<void> _turns() async {
+  for (var i = 0; i < 8; i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+}
 
 void main() {
   test('listens before start_network and dedupes contact requests', () async {
@@ -98,6 +105,101 @@ void main() {
       expect(controller.threads, isEmpty);
     },
   );
+
+  test('unmodifiable db key still finishes bootstrap', () async {
+    final frozen = (Uint8List(32)..fillRange(0, 32, 7)).asUnmodifiableView();
+    final core = MockUmbraCore(timing: MockTiming.instant);
+    final controller = UmbraController(
+      core: core,
+      keyStore: _FixedKey(frozen),
+      settings: SettingsStore(),
+      supportDirectory: () async => '/tmp/umbra-key',
+    );
+    await controller.bootstrap();
+    expect(controller.booting, isFalse);
+    expect(controller.started, isTrue);
+    expect(controller.error, isNull);
+    expect(frozen[0], 7);
+  });
+
+  test(
+    'start_network failure hides listen addresses and clears booting',
+    () async {
+      final core = _NetFail(MockUmbraCore(timing: MockTiming.instant));
+      final controller = UmbraController(
+        core: core,
+        keyStore: MemoryDbKeyStore(),
+        settings: SettingsStore()..mock = false,
+        supportDirectory: () async => '/tmp/umbra-net',
+      );
+      await controller.bootstrap();
+      expect(controller.booting, isFalse);
+      expect(controller.started, isFalse);
+      expect(controller.error, couldNotStartNetwork);
+      expect(controller.error, isNot(contains('/ip4/')));
+      expect(controller.error, isNot(contains('.onion')));
+
+      await controller.fallBackToMock();
+      expect(controller.booting, isFalse);
+      expect(controller.started, isTrue);
+    },
+  );
+
+  test('messages that arrive in an open chat are not unread', () async {
+    final core = MockUmbraCore(timing: MockTiming.instant);
+    final controller = UmbraController(
+      core: core,
+      keyStore: MemoryDbKeyStore(),
+      settings: SettingsStore(),
+      supportDirectory: () async => '/tmp/umbra-read',
+    );
+    await controller.bootstrap();
+    await controller.acceptRequest(MockUmbraCore.mockBot);
+    controller.setThreadOpen(MockUmbraCore.botPeerId, open: true);
+    await _turns();
+    await controller.sendText(MockUmbraCore.botPeerId, 'hi');
+    await _turns();
+    expect(controller.conversations.single.unreadCount, 0);
+
+    controller.setThreadOpen(MockUmbraCore.botPeerId, open: false);
+    await controller.sendText(MockUmbraCore.botPeerId, 'later');
+    await _turns();
+    expect(controller.conversations.single.unreadCount, 1);
+  });
+
+  test('accepting a key change clears verified', () async {
+    final core = MockUmbraCore(timing: MockTiming.instant);
+    final controller = UmbraController(
+      core: core,
+      keyStore: MemoryDbKeyStore(),
+      settings: SettingsStore(),
+      supportDirectory: () async => '/tmp/umbra-keychange',
+    );
+    await controller.bootstrap();
+    await controller.acceptRequest(MockUmbraCore.mockBot);
+    await controller.setVerified(MockUmbraCore.botPeerId, verified: true);
+    core.presentKeyChange(
+      peerId: MockUmbraCore.botPeerId,
+      newIdentityKey: 'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE',
+      newSafetyNumber:
+          '11111 22222 33333 44444 55555 66666 77777 88888 99999 00000 12121 34343',
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.keyChangeNotices, hasLength(1));
+    expect(
+      controller.keyChangeNotices.single.newSafetyNumber,
+      contains('11111'),
+    );
+
+    await controller.acceptKeyChange(MockUmbraCore.botPeerId);
+    expect(controller.keyChangeNotices, isEmpty);
+    expect(controller.contacts.single.verified, isFalse);
+    expect(controller.contacts.single.keyChanged, isFalse);
+    expect(
+      controller.contacts.single.identityKey,
+      'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE',
+    );
+  });
 }
 
 class _OrderCore implements UmbraCore {
@@ -183,6 +285,13 @@ class _OrderCore implements UmbraCore {
       inner.setVerified(peerId, verified: verified);
 
   @override
+  Future<Contact> acceptKeyChange(String peerId) =>
+      inner.acceptKeyChange(peerId);
+
+  @override
+  Future<void> rejectKeyChange(String peerId) => inner.rejectKeyChange(peerId);
+
+  @override
   Future<void> startNetwork() {
     order.add('startNetwork');
     return inner.startNetwork();
@@ -192,4 +301,28 @@ class _OrderCore implements UmbraCore {
   Future<void> stopNetwork() => inner.stopNetwork();
 
   void emitForTest(CoreEvent event) => inner.emitForTest(event);
+}
+
+class _NetFail extends _OrderCore {
+  _NetFail(super.inner);
+
+  @override
+  Future<void> startNetwork() {
+    order.add('startNetwork');
+    throw const UmbraException(
+      'could not listen on any address: /ip4/0.0.0.0/tcp/0: denied; '
+      'abcdef.onion:4001: denied',
+    );
+  }
+}
+
+class _FixedKey implements DbKeyStore {
+  _FixedKey(this.bytes);
+
+  final Uint8List bytes;
+
+  @override
+  Future<DbKeyMaterial> getOrCreate({required String storageDir}) async {
+    return DbKeyMaterial(bytes: bytes, backend: 'test');
+  }
 }

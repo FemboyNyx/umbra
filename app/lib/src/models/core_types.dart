@@ -6,7 +6,20 @@ library;
 
 enum DeliveryStatus { sent, delivered, failed, received }
 
-enum SignalKind { offer, answer, iceCandidate, hangup, ringing, reject }
+/// New variants stay at the end so they match the Rust enum order.
+enum SignalKind {
+  offer,
+  answer,
+  iceCandidate,
+  hangup,
+  ringing,
+  reject,
+  accept,
+  busy,
+}
+
+/// Where a changed identity key was seen.
+enum KeyChangeSource { hello, keyClaim, contactCard }
 
 /// Wire names from `core` `SignalKind` (`Offer`, `Answer`, …).
 ///
@@ -20,6 +33,8 @@ String coreSignalKindWire(SignalKind kind) {
     SignalKind.hangup => 'Hangup',
     SignalKind.ringing => 'Ringing',
     SignalKind.reject => 'Reject',
+    SignalKind.accept => 'Accept',
+    SignalKind.busy => 'Busy',
   };
 }
 
@@ -112,6 +127,8 @@ class Contact {
     required this.safetyNumber,
     required this.addedAtMs,
     required this.online,
+    this.keyChanged = false,
+    this.pendingIdentityKey,
   });
 
   final String peerId;
@@ -124,22 +141,42 @@ class Contact {
   final int addedAtMs;
   final bool online;
 
+  /// A new identity key was presented and is not trusted yet.
+  final bool keyChanged;
+
+  /// The untrusted key, when [keyChanged] is set.
+  final String? pendingIdentityKey;
+
   String get label => displayName.trim().isEmpty ? peerId : displayName;
 
-  Contact copyWith({bool? verified, bool? online, String? displayName}) {
+  Contact copyWith({
+    bool? verified,
+    bool? online,
+    String? displayName,
+    String? identityKey,
+    String? safetyNumber,
+    bool? keyChanged,
+    Object? pendingIdentityKey = _keepPending,
+  }) {
     return Contact(
       peerId: peerId,
       displayName: displayName ?? this.displayName,
-      identityKey: identityKey,
+      identityKey: identityKey ?? this.identityKey,
       ed25519Key: ed25519Key,
       addrs: addrs,
       verified: verified ?? this.verified,
-      safetyNumber: safetyNumber,
+      safetyNumber: safetyNumber ?? this.safetyNumber,
       addedAtMs: addedAtMs,
       online: online ?? this.online,
+      keyChanged: keyChanged ?? this.keyChanged,
+      pendingIdentityKey: identical(pendingIdentityKey, _keepPending)
+          ? this.pendingIdentityKey
+          : pendingIdentityKey as String?,
     );
   }
 }
+
+const _keepPending = Object();
 
 class Message {
   const Message({
@@ -258,6 +295,56 @@ class SignalEvent extends CoreEvent {
 class NetworkStatus extends CoreEvent {
   const NetworkStatus(this.info);
   final NetworkInfo info;
+}
+
+class KeyChanged extends CoreEvent {
+  const KeyChanged({
+    required this.peerId,
+    required this.oldIdentityKey,
+    required this.newIdentityKey,
+    required this.oldSafetyNumber,
+    required this.newSafetyNumber,
+    required this.source,
+  });
+
+  final String peerId;
+  final String oldIdentityKey;
+  final String newIdentityKey;
+  final String oldSafetyNumber;
+  final String newSafetyNumber;
+  final KeyChangeSource source;
+}
+
+/// Safety numbers from a [KeyChanged] event, kept so the warning can show
+/// both values after the contact list reloads.
+class MissedCallNotice {
+  const MissedCallNotice({
+    required this.peerId,
+    required this.callId,
+    required this.reason,
+  });
+
+  final String peerId;
+  final String callId;
+  final String reason;
+}
+
+class KeyChangeNotice {
+  const KeyChangeNotice({
+    required this.peerId,
+    required this.oldIdentityKey,
+    required this.newIdentityKey,
+    required this.oldSafetyNumber,
+    required this.newSafetyNumber,
+    required this.source,
+  });
+
+  final String peerId;
+  final String oldIdentityKey;
+  final String newIdentityKey;
+  final String oldSafetyNumber;
+  final String newSafetyNumber;
+  final KeyChangeSource source;
 }
 
 class UmbraException implements Exception {

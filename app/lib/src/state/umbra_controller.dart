@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../core/core_errors.dart';
 import '../core/mock_umbra_core.dart';
 import '../core/umbra_core.dart';
 import '../keystore/db_key_store.dart';
@@ -36,7 +37,16 @@ class UmbraController extends ChangeNotifier {
 
   final Set<String> _seenRequests = {};
   final Set<String> _dismissed = {};
+  final Set<String> openThreads = {};
   var _listening = false;
+
+  bool callsBlockedByTor = false;
+  String? callNotice;
+  List<MissedCallNotice> missedCallNotices = const [];
+  final Map<String, KeyChangeNotice> keyChanges = {};
+
+  /// Applies Tor mode on the live [CallController] when the SOCKS setting changes.
+  void Function(bool enabled)? applyTorMode;
 
   /// Gem's ingress for `CoreEvent::Signal` (`CallController.handleCoreSignal`).
   ///
@@ -58,6 +68,58 @@ class UmbraController extends ChangeNotifier {
 
   bool get needsOnboarding => (self?.displayName.trim().isEmpty ?? true);
 
+  List<KeyChangeNotice> get keyChangeNotices {
+    final seen = <String>{};
+    final out = <KeyChangeNotice>[];
+    for (final notice in keyChanges.values) {
+      if (seen.add(notice.peerId)) out.add(notice);
+    }
+    for (final contact in contacts) {
+      if (!contact.keyChanged || !seen.add(contact.peerId)) continue;
+      out.add(
+        KeyChangeNotice(
+          peerId: contact.peerId,
+          oldIdentityKey: contact.identityKey,
+          newIdentityKey: contact.pendingIdentityKey ?? '',
+          oldSafetyNumber: contact.safetyNumber,
+          newSafetyNumber: '',
+          source: KeyChangeSource.hello,
+        ),
+      );
+    }
+    return out;
+  }
+
+  void setCallsBlockedByTor(bool blocked) {
+    if (callsBlockedByTor == blocked) return;
+    callsBlockedByTor = blocked;
+    notifyListeners();
+  }
+
+  void noteMissedCall({
+    required String peerId,
+    required String callId,
+    required String reason,
+  }) {
+    missedCallNotices = [
+      ...missedCallNotices,
+      MissedCallNotice(peerId: peerId, callId: callId, reason: reason),
+    ];
+    notifyListeners();
+  }
+
+  void dismissMissedCallAt(int index) {
+    if (index < 0 || index >= missedCallNotices.length) return;
+    missedCallNotices = [...missedCallNotices]..removeAt(index);
+    notifyListeners();
+  }
+
+  void dismissCallNotice() {
+    if (callNotice == null) return;
+    callNotice = null;
+    notifyListeners();
+  }
+
   Future<void> bootstrap() async {
     if (booting) return;
     booting = true;
@@ -67,7 +129,8 @@ class UmbraController extends ChangeNotifier {
     try {
       final dir = await supportDirectory();
       final material = await keyStore.getOrCreate(storageDir: dir);
-      key = material.bytes;
+      key = Uint8List.fromList(material.bytes);
+      _wipe(material.bytes);
       keystoreBackend = material.backend;
       if (key.length != 32) {
         throw const UmbraException('db_key must be 32 bytes');
@@ -93,21 +156,36 @@ class UmbraController extends ChangeNotifier {
         _core.listen(_onEvent);
         _listening = true;
       }
-      await _core.startNetwork();
+      try {
+        await _core.startNetwork();
+      } catch (err, stack) {
+        debugLogCoreError(err, stack);
+        throw const UmbraException(couldNotStartNetwork);
+      }
       network = await _core.networkStatus();
       await _reloadLists();
       started = true;
       error = null;
-    } catch (err) {
-      error = err.toString();
-    } finally {
-      if (key != null) {
-        for (var i = 0; i < key.length; i++) {
-          key[i] = 0;
-        }
+    } catch (err, stack) {
+      if (err is! UmbraException || err.message != couldNotStartNetwork) {
+        debugLogCoreError(err, stack);
       }
+      error = startupErrorMessage(err);
+    } finally {
+      _wipe(key);
       booting = false;
       notifyListeners();
+    }
+  }
+
+  void _wipe(Uint8List? bytes) {
+    if (bytes == null) return;
+    try {
+      for (var i = 0; i < bytes.length; i++) {
+        bytes[i] = 0;
+      }
+    } catch (err, stack) {
+      debugLogCoreError(err, stack);
     }
   }
 
@@ -166,6 +244,20 @@ class UmbraController extends ChangeNotifier {
     return contact;
   }
 
+  Future<void> acceptKeyChange(String peerId) async {
+    await _core.acceptKeyChange(peerId);
+    keyChanges.remove(peerId);
+    await _reloadLists();
+    notifyListeners();
+  }
+
+  Future<void> rejectKeyChange(String peerId) async {
+    await _core.rejectKeyChange(peerId);
+    keyChanges.remove(peerId);
+    await _reloadLists();
+    notifyListeners();
+  }
+
   Future<void> setVerified(String peerId, {required bool verified}) async {
     await _core.setVerified(peerId, verified: verified);
     await _reloadLists();
@@ -184,6 +276,15 @@ class UmbraController extends ChangeNotifier {
     await _reloadThread(peerId);
     await _reloadLists();
     notifyListeners();
+  }
+
+  void setThreadOpen(String peerId, {required bool open}) {
+    if (open) {
+      openThreads.add(peerId);
+      unawaited(markThreadRead(peerId));
+    } else {
+      openThreads.remove(peerId);
+    }
   }
 
   Future<void> markThreadRead(String peerId) async {
@@ -219,6 +320,9 @@ class UmbraController extends ChangeNotifier {
     if (enableMdns != null) settings.enableMdns = enableMdns;
     if (torSocks != null) settings.torSocks = torSocks;
     await settings.save();
+    if (torSocks != null) {
+      applyTorMode?.call(settings.torSocks.trim().isNotEmpty);
+    }
     notifyListeners();
   }
 
@@ -259,18 +363,48 @@ class UmbraController extends ChangeNotifier {
                 payload: payload,
               );
             } catch (err, stack) {
-              debugPrint('handleCoreSignal failed: $err\n$stack');
+              debugLogCoreError(err, stack);
+              final text = err.toString();
+              if (text.contains('no_audio_device') ||
+                  text.contains('No audio device')) {
+                callNotice = 'No audio device is available.';
+                notifyListeners();
+              }
             }
           }());
         }
       case NetworkStatus(:final info):
         network = info;
+      case KeyChanged(
+        :final peerId,
+        :final oldIdentityKey,
+        :final newIdentityKey,
+        :final oldSafetyNumber,
+        :final newSafetyNumber,
+        :final source,
+      ):
+        keyChanges[peerId] = KeyChangeNotice(
+          peerId: peerId,
+          oldIdentityKey: oldIdentityKey,
+          newIdentityKey: newIdentityKey,
+          oldSafetyNumber: oldSafetyNumber,
+          newSafetyNumber: newSafetyNumber,
+          source: source,
+        );
+        unawaited(_refreshLists());
     }
     notifyListeners();
   }
 
   Future<void> _refreshThread(String peerId) async {
     await _reloadThread(peerId);
+    if (openThreads.contains(peerId)) {
+      final messages = threads[peerId] ?? const <Message>[];
+      if (messages.isNotEmpty) {
+        await _core.markRead(peerId, messages.last.id);
+        await _reloadThread(peerId);
+      }
+    }
     await _reloadLists();
     notifyListeners();
   }

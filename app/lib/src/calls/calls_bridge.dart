@@ -8,29 +8,37 @@ import '../models/core_types.dart';
 /// Incoming `CoreEvent::Signal` values are forwarded only through
 /// [handleCoreSignal]. This file does not branch on Offer, Answer, or ICE.
 class UmbraCallsBridge {
-  UmbraCallsBridge({required this.core, required this.localPeerId});
+  UmbraCallsBridge({
+    required this.core,
+    required this.localPeerId,
+    required bool torMode,
+  }) : controller = calls.CallController(
+         localPeerId: localPeerId,
+         transport: calls.CoreSignalTransport(({
+           required String peerId,
+           required String callId,
+           required calls.SignalKind kind,
+           required String payload,
+         }) {
+           return core.sendSignal(
+             peerId: peerId,
+             callId: callId,
+             kind: _toCoreKind(kind),
+             payload: payload,
+           );
+         }),
+         iceConfig: calls.IceConfig().withTorMode(torMode),
+       ) {
+    controller.setTorMode(torMode);
+  }
 
   final UmbraCore core;
   final String localPeerId;
+  final calls.CallController controller;
 
-  late final calls.CallController controller = calls.CallController(
-    localPeerId: localPeerId,
-    transport: calls.CoreSignalTransport(({
-      required String peerId,
-      required String callId,
-      required calls.SignalKind kind,
-      required String payload,
-    }) {
-      return core.sendSignal(
-        peerId: peerId,
-        callId: callId,
-        kind: _toCoreKind(kind),
-        payload: payload,
-      );
-    }),
-  );
+  void setTorMode(bool enabled) => controller.setTorMode(enabled);
 
-  /// Gem's ingress: `CallController.handleCoreSignal` (`c151dcc`).
+  /// `CallController.handleCoreSignal` is the only calls entry point.
   ///
   /// Offer, Answer, and ICE are not interpreted here.
   Future<void> handleCoreSignal({
@@ -58,8 +66,7 @@ SignalKind _toCoreKind(calls.SignalKind kind) {
     calls.SignalKind.hangup => SignalKind.hangup,
     calls.SignalKind.ringing => SignalKind.ringing,
     calls.SignalKind.reject => SignalKind.reject,
-    calls.SignalKind.accept || calls.SignalKind.busy => throw UmbraException(
-      'core has no signal kind ${kind.wire}',
-    ),
+    calls.SignalKind.accept => SignalKind.accept,
+    calls.SignalKind.busy => SignalKind.busy,
   };
 }

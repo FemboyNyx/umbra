@@ -6,6 +6,7 @@ import '../models/core_types.dart';
 import '../state/umbra_controller.dart';
 import '../theme/umbra_theme.dart';
 import 'contact_detail_screen.dart';
+import 'key_change_banner.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.controller, required this.peerId});
@@ -20,16 +21,19 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _body = TextEditingController();
   final _scroll = ScrollController();
+  final _focus = FocusNode();
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    unawaited(widget.controller.markThreadRead(widget.peerId));
+    widget.controller.setThreadOpen(widget.peerId, open: true);
   }
 
   @override
   void dispose() {
+    widget.controller.setThreadOpen(widget.peerId, open: false);
+    _focus.dispose();
     _body.dispose();
     _scroll.dispose();
     super.dispose();
@@ -45,7 +49,15 @@ class _ChatScreenState extends State<ChatScreen> {
       _jumpToEnd();
     } catch (err) {
       setState(() => _error = err.toString());
+    } finally {
+      _keepFocus();
     }
+  }
+
+  void _keepFocus() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focus.requestFocus();
+    });
   }
 
   void _jumpToEnd() {
@@ -108,6 +120,15 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
+          for (final notice in widget.controller.keyChangeNotices)
+            if (notice.peerId == widget.peerId)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                child: KeyChangeBanner(
+                  controller: widget.controller,
+                  notice: notice,
+                ),
+              ),
           Expanded(
             child: messages.isEmpty
                 ? const Center(child: Text('Say hello.'))
@@ -137,6 +158,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   Expanded(
                     child: TextField(
                       controller: _body,
+                      focusNode: _focus,
                       minLines: 1,
                       maxLines: 4,
                       textInputAction: TextInputAction.send,

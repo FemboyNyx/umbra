@@ -65,6 +65,17 @@ Future<void> setVerified({required String peerId, required bool verified}) =>
       verified: verified,
     );
 
+/// Trust a contact's new identity key after `CoreEvent::KeyChanged`.
+/// Drops old Olm sessions, sets `verified = false` and clears the flag.
+/// Only call this after the user re-compared safety numbers.
+Future<Contact> acceptKeyChange({required String peerId}) =>
+    RustLib.instance.api.crateApiUmbraAcceptKeyChange(peerId: peerId);
+
+/// Keep refusing a contact's new identity key. The old key stays trusted;
+/// the refused key is remembered and won't alert again (a different one will).
+Future<void> rejectKeyChange({required String peerId}) =>
+    RustLib.instance.api.crateApiUmbraRejectKeyChange(peerId: peerId);
+
 /// Remove the contact, its Olm sessions, messages and pending outbox.
 Future<void> removeContact({required String peerId}) =>
     RustLib.instance.api.crateApiUmbraRemoveContact(peerId: peerId);
