@@ -283,7 +283,7 @@ jobs:
             echo "Umbra ${GITHUB_REF_NAME}: no platform binaries attached (app/ not present)." > release-assets/README-release.txt
           fi
           cd release-assets
-          sha256sum * > SHA256SUMS
+          sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
