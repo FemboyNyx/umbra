@@ -23,6 +23,21 @@ class CallPrivacyException implements Exception {
   String toString() => 'CallPrivacyException($code): $message';
 }
 
+/// A call that was refused automatically before the user saw it ringing.
+class MissedCall {
+  const MissedCall({
+    required this.peerId,
+    required this.callId,
+    required this.reason,
+  });
+  final String peerId;
+  final String callId;
+
+  /// Same value sent to the caller as the Reject reason,
+  /// e.g. `tor_relay_required`.
+  final String reason;
+}
+
 /// App-facing API for 1:1 calls.
 ///
 /// **E2E guarantee:** SDP offers/answers and ICE candidates must be applied
@@ -46,6 +61,10 @@ class CallController {
   CallSession? active;
   final _incoming = StreamController<CallSession>.broadcast();
   Stream<CallSession> get incomingCalls => _incoming.stream;
+  final _missed = StreamController<MissedCall>.broadcast();
+
+  /// Calls auto-rejected without ringing (e.g. Tor mode with no TURN).
+  Stream<MissedCall> get missedCalls => _missed.stream;
   final _rng = Random.secure();
 
   String _newCallId() {
@@ -158,6 +177,24 @@ class CallController {
     }
 
     if (msg.kind == SignalKind.ringing) {
+      if (iceConfig.torRelayBlocked) {
+        // Fail closed: never ring (and never set up media) when Tor mode has
+        // no relay. Tell the caller why, and surface it to our user.
+        await transport.send(CallSignalMessage(
+          kind: SignalKind.reject,
+          callId: msg.callId,
+          fromPeerId: localPeerId,
+          toPeerId: msg.fromPeerId,
+          mediaMode: msg.mediaMode,
+          reason: 'tor_relay_required',
+        ));
+        _missed.add(MissedCall(
+          peerId: msg.fromPeerId,
+          callId: msg.callId,
+          reason: 'tor_relay_required',
+        ));
+        return;
+      }
       if (active != null &&
           active!.state != CallSessionState.ended &&
           active!.state != CallSessionState.failed) {
@@ -212,5 +249,6 @@ class CallController {
     await active?.destroy();
     active = null;
     await _incoming.close();
+    await _missed.close();
   }
 }
