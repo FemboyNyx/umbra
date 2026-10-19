@@ -286,7 +286,9 @@ pub async fn spawn(
         let mut errors = Vec::new();
         for a in &cfg.listen {
             if let Err(e) = swarm.listen_on(a.clone()) {
-                tracing::warn!(%a, "listen failed: {e}");
+                // Our own addresses (and errors that embed them) stay at debug.
+                tracing::warn!("a listen address could not be bound");
+                tracing::debug!(%a, "listen failed: {e}");
                 errors.push(format!("{a}: {e}"));
             }
         }
@@ -314,7 +316,9 @@ pub async fn spawn(
             continue;
         }
         if let Err(e) = swarm.listen_on(r.clone().with(Protocol::P2pCircuit)) {
-            tracing::warn!(%r, "relay listen failed: {e}");
+            // The circuit address is our own listen address: debug only.
+            tracing::warn!("relay listen failed");
+            tracing::debug!(%r, "relay listen failed: {e}");
         }
     }
 
@@ -463,7 +467,9 @@ impl NetTask {
     fn on_event(&mut self, ev: SwarmEvent<BehaviourEvent>) {
         match ev {
             SwarmEvent::NewListenAddr { address, .. } => {
-                tracing::info!(%address, "listening");
+                // Never log our own listen addresses above debug: with Tor
+                // listening one of them is our .onion.
+                tracing::debug!("new listen address");
                 self.core
                     .on_listen_addr(address, true, self.swarm.connected_peers().count());
             }
