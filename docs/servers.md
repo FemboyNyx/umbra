@@ -28,7 +28,7 @@ padding, anti-replay and anti-rollback) are in
 | Membership | Owner-signed manifest with a sequence number, plus admin-signed roster ops. **Recovery keys are required** at server creation | Decided. Adds rollback and fork rules and ownership transfer |
 | Invites | **Every server is invite-only.** Invites are **authorized-only**: only roles with the `invite` permission (owner and admins by default) can create them | **(Nyx)** |
 | Public servers | **Not planned.** No public or listed servers | **(Nyx)** |
-| Discovery | **Umbra runs no directory and no bootstrap.** The app only joins (by invite), creates, and shows your servers. User-added directories are a **proposed extension**, pending Nyx | **(Nyx)**, extension pending |
+| Discovery | **Umbra runs no directory and no bootstrap.** The app only joins (by invite), creates, and shows your servers. Users can add **third-party directories** themselves (phase 2) | **(Nyx)** |
 | History for new members | **On by default**: new members can read earlier history. Configurable per server and per channel. "History from join" is the alternative setting | **Decided (Nyx)**, confirmed |
 | Identity | A **default identity** used across servers, which users can customise per server (per-server profile). A **separate identity per server** is an option | **Decided (Nyx)**, confirmed |
 | Bans | Enforced by rotation and host ACLs. A banned member keeps whatever they already decrypted or hold keys for | Agrees with Chi, with that limit stated plainly |
@@ -914,16 +914,15 @@ anyone could join. That's gone. If it ever comes back, it needs the warning
 that end-to-end encryption doesn't protect against someone who simply joins,
 and anyone who joined could read the history window.
 
-**Proposed extension, pending Nyx: user-added directories.** A user could add
+**Decided (Nyx): user-added directories, phase 2.** A user can add
 a third-party directory address themselves. A directory would only hold
 owner-signed `ServerListing { server_id, seq, name, description, icon,
 join_hosts, expires, sig }` entries, with no member lists or contents, and
-joining through one would still be **request-to-join**, approved by a role
-with the `invite` permission, so servers stay invite-only. The costs, if
-Nyx wants it: announcing shows the directory the owner's PeerId and IP, and
+joining through one is still **request-to-join**, approved by a role
+with the `invite` permission, so servers stay invite-only. The costs: announcing shows the directory the owner's PeerId and IP, and
 searching shows the searcher's IP and query, unless they're on Tor. A
 directory can hide listings or show different people different ones, but it
-can't forge them. Nothing in phases 0 to 3 depends on this.
+can't forge them. Umbra ships no default directory; the app only offers one the user adds. Nothing in phases 0 and 1 depends on this.
 
 ## Identity across servers
 
@@ -1361,9 +1360,9 @@ history.
 | --- | --- | --- |
 | 0 | Card v2 (`ik` signed by `ed`), co-member trust class with message requests, outbox generalisation, `Payload` v2 (`seq`, `prev`, `skipped`, `exp`), padding and the replay record for DMs | Elite |
 | 1 | Servers, text channels, authorized-only invites, roles, kick and ban, required recovery keys, rotation, history sharing (on by default, configurable), the standalone `umbra-host` blind host **with operator duties from legal.md §4 (published contact, onboarding warnings and AUP, IP logging off by default, blob, peer and server denylists with signed refusal receipts, preservation holds, takedown notices)**, files and GIFs as files, per-server profiles. **Host sanity checks:** hash chains, heads, host receipts, self-audit, cross-checks, alerts and the host health page for channels, DMs and the outbox. **Disappearing messages** for DMs and channels, with role policies | Elite (core and `umbra-host`), Copilot (UI), Sally (packaging `umbra-host`), Val (onion hosts once `tor-listen` is stable) |
-| 2 | Link previews, server sticker and GIF packs, separate identities per server, integrity evidence export | Elite, Copilot |
+| 2 | Link previews, user-added directories (signed listings, request-to-join), server sticker and GIF packs, separate identities per server, integrity evidence export | Elite, Copilot |
 | 3 | Voice channels | Gem |
-| Not planned | Public servers, an Umbra-run directory or bootstrap, GIF providers. User-added directories are a proposed extension pending Nyx | |
+| Not planned | Public servers, an Umbra-run directory or bootstrap, GIF providers | |
 
 Device-side protections (app lock, screen security, view-once, anti-rollback, duress PIN, sealed sender) use the same phases, ranked in [message-protection.md](message-protection.md#ranked-value-versus-cost).
 
@@ -1389,8 +1388,8 @@ inside Olm signals. For groups there are two options:
    default).
 3. ~~**Index:** a default index, or none?~~ **Decided (Nyx):** Umbra runs no
    directory or bootstrap, and the app only joins, creates and shows your
-   servers. **Still open:** whether to add the proposed user-added directories
-   extension.
+   servers. Users can add
+   third-party directories themselves (phase 2), joined by request only.
 4. ~~**History default.**~~ **Decided (Nyx, confirmed):** on by default,
    configurable per server and per channel, with "history from join" as the
    alternative setting.
