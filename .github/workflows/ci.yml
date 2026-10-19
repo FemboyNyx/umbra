@@ -187,6 +187,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        if: needs.detect.outputs.has_core == 'true'
+        working-directory: core
+        run: |
+          rustup toolchain install
+          rustup show
+          rustc --version
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -229,12 +236,22 @@ jobs:
             exit 0
           }
           flutter pub get
-          $env:MSIX_CERTIFICATE_PATH = $pfx
-          $env:MSIX_CERTIFICATE_PASSWORD = $env:WINDOWS_CERT_PASSWORD
-          flutter pub run msix:create
+          $out = Join-Path $env:GITHUB_WORKSPACE "dist"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          # msix only reads certificate_path/password from msix_config or CLI flags
+          # (no env vars), so pass them explicitly. Reuse the release build above
+          # and don't try to install the cert on the runner.
+          dart run msix:create `
+            --certificate-path $pfx `
+            --certificate-password $env:WINDOWS_CERT_PASSWORD `
+            --build-windows false `
+            --install-certificate false `
+            --output-path $out `
+            --output-name umbra-windows-x64
+          if ($LASTEXITCODE -ne 0) { throw "msix:create failed ($LASTEXITCODE)" }
           Pop-Location
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item app/build/windows/x64/runner/Release/*.msix dist/ -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $pfx -Force
+          if (-not (Get-ChildItem $out -Filter *.msix)) { throw "msix:create produced no .msix" }
       - uses: actions/upload-artifact@v4
         with:
           name: umbra-windows
@@ -250,6 +267,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        if: needs.detect.outputs.has_core == 'true'
+        working-directory: core
+        run: |
+          rustup toolchain install
+          rustup show
+          rustc --version
       - name: Install Linux build deps
         run: |
           sudo apt-get update
