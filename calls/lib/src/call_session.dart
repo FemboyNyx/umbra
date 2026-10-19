@@ -133,7 +133,9 @@ class CallSession {
     await dispose(failed: false);
   }
 
-  Future<void> onRemoteSignal(CallSignalMessage msg) async {
+  /// Apply a signal CallController authenticated as CoreEvent::Signal
+  /// for this session remote peer. Do not call from UI or other channels.
+  Future<void> applyRemoteSignal(CallSignalMessage msg) async {
     if (msg.callId != callId) return;
     switch (msg.kind) {
       case SignalKind.accept:

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'call_privacy.dart';
@@ -14,7 +15,12 @@ class CallPrivacyException implements Exception {
   String toString() => 'CallPrivacyException($code): $message';
 }
 
-/// App-facing API. Wire [transport] to core `send_signal`; peer id from `self_info()`.
+/// App-facing API for 1:1 calls.
+///
+/// **E2E guarantee:** SDP offers/answers and ICE candidates must be applied
+/// only after they arrive on core's encrypted `CoreEvent::Signal` path.
+/// Use [handleCoreSignal] — never feed raw SDP from the UI, deep links,
+/// push payloads, or any unencrypted channel into a [CallSession].
 class CallController {
   CallController({
     required this.localPeerId,
@@ -81,19 +87,59 @@ class CallController {
     );
     await session.initRenderers();
     active = session;
-    try {
-      await session.startAsCaller();
-    } catch (_) {
-      // Session already marked failed (unreachable peer / payload).
-      rethrow;
-    }
+    await session.startAsCaller();
     return session;
   }
 
+  /// Canonical ingress for core `CoreEvent::Signal`.
+  ///
+  /// This is the **only** supported way to inject remote Offer / Answer / ICE.
+  Future<void> handleCoreSignal({
+    required String peerId,
+    required String callId,
+    required String kindWire,
+    required String payload,
+  }) async {
+    Map<String, Object?> body = {};
+    if (payload.isNotEmpty) {
+      final decoded = jsonDecode(payload);
+      if (decoded is Map) {
+        body = decoded.map((k, v) => MapEntry(k.toString(), v as Object?));
+      }
+    }
+    final msg = CallSignalMessage.fromCore(
+      peerId: peerId,
+      localPeerId: localPeerId,
+      callId: callId,
+      kindWire: kindWire,
+      payload: body,
+    );
+    if (msg == null) return;
+    await _dispatchTrusted(msg);
+  }
+
+  /// Parse a JSON map that already came from a trusted core Signal event.
+  /// Prefer [handleCoreSignal] at the bridge boundary.
   Future<void> handleSignal(Map<String, Object?> json) async {
     final msg = CallSignalMessage.parse(json);
     if (msg == null) return;
+    await _dispatchTrusted(msg);
+  }
+
+  Future<void> _dispatchTrusted(CallSignalMessage msg) async {
     if (msg.toPeerId.isNotEmpty && msg.toPeerId != localPeerId) return;
+
+    // Media renegotiation kinds are only valid for the active peer/call.
+    if (_isMediaKind(msg.kind)) {
+      final session = active;
+      if (session == null ||
+          session.callId != msg.callId ||
+          session.remotePeerId != msg.fromPeerId) {
+        return; // drop injected / mismatched SDP & ICE
+      }
+      await session.applyRemoteSignal(msg);
+      return;
+    }
 
     if (msg.kind == SignalKind.ringing) {
       if (active != null &&
@@ -127,8 +173,14 @@ class CallController {
 
     final session = active;
     if (session == null || session.callId != msg.callId) return;
-    await session.onRemoteSignal(msg);
+    if (session.remotePeerId != msg.fromPeerId) return;
+    await session.applyRemoteSignal(msg);
   }
+
+  static bool _isMediaKind(SignalKind kind) =>
+      kind == SignalKind.offer ||
+      kind == SignalKind.answer ||
+      kind == SignalKind.iceCandidate;
 
   Future<void> acceptIncoming({bool skipPrivacyCheck = false}) async {
     if (!skipPrivacyCheck) _assertMayStartMedia();
