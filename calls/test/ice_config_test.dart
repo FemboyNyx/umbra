@@ -45,4 +45,19 @@ void main() {
     expect(preCallIpWarning.contains("'"), isFalse);
     expect(preCallIpWarning, contains('reveal your IP address'));
   });
+
+  test('tor mode forces relay and blocks without TURN', () {
+    final noTurn = IceConfig().withTorMode(true);
+    expect(noTurn.forcesRelay, isTrue);
+    expect(noTurn.torRelayBlocked, isTrue);
+    expect(noTurn.toPeerConnectionConfig()['iceTransportPolicy'], 'relay');
+    expect(urlsOf(noTurn), isEmpty);
+
+    final withTurn = noTurn.withTurn(const [turn]);
+    expect(withTurn.torRelayBlocked, isFalse);
+    expect(withTurn.toPeerConnectionConfig()['iceTransportPolicy'], 'relay');
+
+    final direct = withTurn.withRelayPolicy(CallRelayPolicy.allowDirect);
+    expect(direct.forcesRelay, isTrue, reason: 'Tor never allows direct');
+  });
 }

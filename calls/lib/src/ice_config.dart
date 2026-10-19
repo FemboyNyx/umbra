@@ -4,8 +4,10 @@
 /// via [IceConfig.defaultStun]. TURN is never hardcoded: the user (or their
 /// self-hosted config) supplies TURN URLs and credentials.
 ///
-/// In Tor mode ([IceConfig.torMode]) no STUN server is ever contacted, since a
-/// STUN request reveals the device's real public IP to the STUN operator.
+/// In Tor mode ([IceConfig.torMode]) calls are forced to relay-only: no STUN
+/// server is contacted and `iceTransportPolicy` is `relay`, so a direct P2P
+/// path (which would reveal the real IP) is never used. Without TURN, calls in
+/// Tor mode fail closed; there is no fallback to direct.
 library;
 
 import 'call_privacy.dart';
@@ -50,11 +52,13 @@ class IceConfig {
   /// [stunServers]. Only user-configured TURN servers are passed to WebRTC.
   final bool torMode;
 
-  /// STUN servers that will actually be used: none in Tor mode or relay-only.
+  /// True when only relay (TURN) candidates may be used: relay-only policy,
+  /// or Tor mode (which always forces relay).
+  bool get forcesRelay => torMode || relayPolicy == CallRelayPolicy.relayOnly;
+
+  /// STUN servers that will actually be used: none when relay is forced.
   List<IceServer> get effectiveStunServers =>
-      (torMode || relayPolicy == CallRelayPolicy.relayOnly)
-          ? const []
-          : stunServers;
+      forcesRelay ? const [] : stunServers;
 
   /// Public STUN only — no private infrastructure, no secrets.
   static const List<IceServer> defaultPublicStun = [
@@ -70,8 +74,10 @@ class IceConfig {
   bool get hasTurn => turnServers.any((s) => s.isTurn);
 
   /// True when relay-only is requested but no TURN is configured.
-  bool get relayOnlyBlocked =>
-      relayPolicy == CallRelayPolicy.relayOnly && !hasTurn;
+  bool get relayOnlyBlocked => forcesRelay && !hasTurn;
+
+  /// True when Tor mode is on but no TURN server exists, so calls can't run.
+  bool get torRelayBlocked => torMode && !hasTurn;
 
   /// Merge STUN + user TURN for `RTCPeerConnection` configuration.
   ///
@@ -79,7 +85,7 @@ class IceConfig {
   /// `iceTransportPolicy` is set to `relay` so host/srflx candidates
   /// are not used (requires TURN).
   Map<String, dynamic> toPeerConnectionConfig() {
-    final relayOnly = relayPolicy == CallRelayPolicy.relayOnly;
+    final relayOnly = forcesRelay;
     final servers = <Map<String, dynamic>>[
       ...effectiveStunServers.map((s) => s.toWebRtcMap()),
       ...turnServers.map((s) => s.toWebRtcMap()),
