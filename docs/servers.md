@@ -14,7 +14,9 @@ uploads, GIFs and link embeds. Nyx later added two features: **host sanity
 checks** (clients notice when a host drops or withholds data) and
 **disappearing messages**. This doc says how to build all of that on top of
 the current core, and where the security story is weaker than "encrypted"
-suggests.
+suggests. Device-side protections (screen security, app lock, view-once,
+padding, anti-replay and anti-rollback) are in
+[message-protection.md](message-protection.md).
 
 ## Summary of decisions
 
@@ -34,7 +36,7 @@ suggests.
 | Limits | **250 members, 100 MiB per file, 30-day host ciphertext retention** | Decided |
 | Embeds and GIFs | Sender-side link previews. **No GIF provider or API key.** GIFs are ordinary encrypted file attachments, plus optional per-server sticker and GIF packs uploaded by admins | **(Nyx)** |
 | Host sanity checks | Per-sender sequence numbers and hash chains inside the encrypted payload, sender-signed heads, host-signed receipts, and cross-checks with other members. Gaps that no expiry, retention or deletion explains raise an alert | New feature (Nyx) |
-| Disappearing messages | Timer per chat or channel, or a role policy. The shortest timer wins. Expiry is inside the encrypted payload. Clients and hosts delete at expiry, best effort | New feature (Nyx) |
+| Disappearing messages | Timer per chat or channel, or a role policy. The shortest timer wins. Signal-style: the timer starts at send on the sender's device and on hosts, and at read on each recipient's device, with a hard cap of sent + timer + 7 days. Expiry is inside the encrypted payload. Best effort | New feature (Nyx). Timer start decided by Chi |
 | Names | The suffix is for **telling people apart, never for trust**. Hash-derived suffixes can be ground cheaply at any length people would read | Pushback on Chi's call 8. Math in [Names](#names-and-impersonation) |
 
 ## What exists today and what servers need
@@ -238,9 +240,11 @@ Rules:
   Messages posted under `from_join` never become readable to later members if
   an admin switches the channel to `shared`, and switching to `from_join` stops
   new forwards (what was already forwarded can't be taken back).
-- **Expired messages are never shared.** The export index skips past them,
-  sessions whose messages have all expired are deleted rather than
-  forwarded, and J's client drops anything whose `exp` has passed.
+- **Expired messages are never shared.** The export index skips past
+  messages whose `sent + timer` has passed, sessions whose messages have all
+  passed it are deleted rather than forwarded, and J's client drops anything
+  whose `exp` has passed. For what J does get, J's own timer starts when J
+  reads it, capped at `sent + timer + 7 days`.
 - Forwarding is rate-limited per joiner and only goes to current roster
   members.
 
@@ -388,7 +392,7 @@ these hold:
 
 | Reason | How the client knows |
 | --- | --- |
-| It expired | For a gap between *a* and *b*, every missing item was sent between `ts_a` and `ts_b`, so it expired by `ts_b + max(timer_a, timer_b)`. If `timer_seq` in *b* points inside the gap, the timer changed there; timer changes never expire, so that item has to be present, and its absence is unexpected |
+| It expired | Expiry here always means the signed `sent + timer`, never a recipient's read-based timer. For a gap between *a* and *b*, every missing item was sent between `ts_a` and `ts_b`, so it expired by `ts_b + max(timer_a, timer_b)`. If `timer_seq` in *b* points inside the gap, the timer changed there; timer changes never expire, so that item has to be present, and its absence is unexpected |
 | Retention | It's older than `policy.retention` in the manifest |
 | Deleted | A signed `DeleteMessage` op covers it |
 | Before your window | It's before your join in a `from_join` channel, or before the history window |
@@ -408,7 +412,7 @@ receipt says exists. And if the host can't be reached at all, that's shown as
 
 | Level | When | What the user sees |
 | --- | --- | --- |
-| Info | Expected absence | Inline muted marker: "3 messages expired", "Older messages are past this server's 30-day retention". No notification |
+| Info | Expected absence | Inline muted marker: "3 messages expired", "2 messages expired before delivery", "Older messages are past this server's 30-day retention". No notification |
 | Warning | An unexpected absence that survives a re-fetch, a fetch by hash from at least one other source, and a **15-minute grace period (proposed)** | A persistent **host health** indicator on the server (an amber dot on the host badge and in server settings) with "Host H didn't return 2 messages from Ana". **At most one notification per host per day (proposed)**, and repeats fold into the same open incident |
 | Critical | A host contradicts its own signed receipt, or cross-checks prove a split view | A blocking banner like forks and rollbacks, with the evidence (receipts and heads) that can be sent to admins over Olm |
 | Sender fork | Two signed envelopes for one `seq` | Blocking banner against the sender |
@@ -440,7 +444,7 @@ DMs don't go through hosts today, but the same checks apply to `Payload` v2:
 - `seq` per direction per contact, `prev` = SHA-256 of the previous
   `Payload` plaintext, and `exp`.
 - **Outbox expiry.** When an undelivered message expires from the 7-day
-  outbox (or at its `exp`, if sooner), the sender's client marks it failed
+  outbox (or at `sent + timer`, if sooner), the sender's client marks it failed
   (as today) and the next message carries `skipped: [seq ranges]`. The
   receiver shows "1 message expired before it was delivered" as info, not as
   an alert.
@@ -479,9 +483,33 @@ only that it didn't hand it over.
 timers that apply, and it doesn't disappear only if none apply. A sender can
 make their own messages shorter-lived than the policy, never longer. Honest
 receivers clamp anyway: they use `min(exp, ts + policy max, arrival + policy
-max)` if a sender claims a longer `exp` than the policy allows. Timers count
-**from sending (decided here)**, not from reading, because hosts and the
-integrity checks need one expiry time for everyone.
+max)` if a sender claims a longer `exp` than the policy allows.
+
+### When the timer starts (decided, Chi)
+
+It works like Signal:
+
+| Where | Timer starts | Deleted at |
+| --- | --- | --- |
+| Sender's device | When the message is sent | `exp = sent + timer` |
+| Hosts | When the message is sent | `min(sent + timer, stored + 30-day retention)`, rounded up to the hour (`exp_bucket`) |
+| Each recipient's device | When that recipient reads it | `min(read + timer, sent + timer + 7 days)` |
+
+The **hard cap** means an unread message on a recipient's device expires at
+most `timer + 7 days` after it was sent, even if it's never opened. The
+signed `exp` in the payload is always `sent + timer`, so hosts and the
+integrity checks have one expiry time for everyone, while each recipient's
+local clock starts on reading.
+
+**Consequence, stated plainly:** a message can only be delivered before
+`sent + timer`. Peer-to-peer delivery and the sender's outbox still work
+until then (the outbox keeps a disappearing message for
+`min(7 days, timer)`), and hosts hold it until `sent + timer`. If a recipient
+is offline past `sent + timer`, the host has already purged it and the
+sender has deleted it, so the recipient sees **"expired before delivery"**.
+With a short timer (say 5 minutes), a member who's offline for an hour
+misses those messages entirely. That's working as intended, not a host
+fault.
 
 Timer changes (`TimerChange` in DMs and a sender's own timer, manifest edits
 for channels and roles) never expire themselves, and are shown inline
@@ -499,13 +527,16 @@ for channels and roles) never expire themselves, and are shown inline
   mismatch as a sender error. The host learns roughly how long each message
   lives, which is new metadata.
 
-Edits, reactions and replies inherit the expiry of the message they target,
-and can't extend it.
+Edits, reactions and replies inherit the expiry of the message they target
+(the same `sent + timer` on hosts, and the target's local expiry on each
+device), and can't extend it.
 
 ### Deleting
 
-On every client, when a message expires (checked at start-up and on a timer,
-**within 1 minute of `exp`, proposed**):
+On every client, when a message reaches its local expiry (`exp` on the
+sender's device, `min(read + timer, sent + timer + 7 days)` on a
+recipient's; checked at start-up and on a timer, **within 1 minute,
+proposed**):
 
 - delete the message row, its edits and reactions, and the quoted snippet in
   replies (shown as "Expired message");
@@ -519,14 +550,18 @@ On every client, when a message expires (checked at start-up and on a timer,
 
 **Keys.** Olm already throws away per-message keys. For Megolm, a reader calls
 `advance_to` past expired indices once no earlier message in that session is
-still alive, and deletes a whole inbound session once its last message has
-expired (rotation once per timer period makes that happen on time). Senders
-delete outbound sessions the same way. In `shared` channels, expired messages
-are never forwarded, so this doesn't conflict with history sharing.
+still alive locally, and deletes a whole inbound session once its last
+message has expired locally or hit the hard cap (rotation once per timer
+period makes the cap line up). Senders delete outbound sessions once every
+message in them has passed `sent + timer`. In `shared` channels, only
+messages before `sent + timer` are ever forwarded, and a joiner's own timer
+for them starts when they read them, under the same hard cap.
 
 **Hosts** purge envelopes, chunks (blobs carry the longest `exp_bucket` of any
-message that references them) and relayed Olm payloads at `exp_bucket`. A
-host may not drop anything earlier, and clients alert if it does
+message that references them) and relayed Olm payloads at `exp_bucket`
+(`sent + timer` rounded up to the hour) or at the 30-day retention limit,
+whichever comes first. Neither raises an integrity alert. A host may not
+drop anything earlier, and clients alert if it does
 ([Host sanity checks](#host-sanity-checks)). Whether a host really purged
 can't be checked.
 
@@ -540,7 +575,9 @@ Shown to the user when they turn a timer on, in plain words:
 
 Deletion is best effort. It protects against someone who gets a device
 later, and keeps old messages from piling up. It doesn't protect against a
-recipient. Member hosts are recipients.
+recipient. Member hosts are recipients. View-once, screen security and the
+forward hint, and which of them are theatre, are in
+[message-protection.md](message-protection.md).
 
 ## Membership, roles and moderation
 
@@ -1072,11 +1109,13 @@ history.
 
 | Phase | Scope | Needs |
 | --- | --- | --- |
-| 0 | Card v2 (`ik` signed by `ed`), co-member trust class with message requests, outbox generalisation, `Payload` v2 (`seq`, `prev`, `skipped`, `exp`) | Elite |
+| 0 | Card v2 (`ik` signed by `ed`), co-member trust class with message requests, outbox generalisation, `Payload` v2 (`seq`, `prev`, `skipped`, `exp`), padding and the replay record for DMs | Elite |
 | 1 | Servers, text channels, authorized-only invites, roles, kick and ban, required recovery keys, rotation, history sharing (on by default, configurable), the standalone `umbra-host` blind host, files and GIFs as files, per-server profiles. **Host sanity checks:** hash chains, heads, host receipts, self-audit, cross-checks, alerts and the host health page for channels, DMs and the outbox. **Disappearing messages** for DMs and channels, with role policies | Elite (core and `umbra-host`), Copilot (UI), Sally (packaging `umbra-host`), Val (onion hosts once `tor-listen` is stable) |
 | 2 | Link previews, server sticker and GIF packs, separate identities per server, integrity evidence export | Elite, Copilot |
 | 3 | Voice channels | Gem |
 | Not planned | Public servers, an Umbra-run directory or bootstrap, GIF providers. User-added directories are a proposed extension pending Nyx | |
+
+Device-side protections (app lock, screen security, view-once, anti-rollback, duress PIN, sealed sender) use the same phases, ranked in [message-protection.md](message-protection.md#ranked-value-versus-cost).
 
 **Voice (phase 3, with Gem).** Today's calls are 1:1 flutter_webrtc with SDP
 inside Olm signals. For groups there are two options:
@@ -1121,7 +1160,8 @@ inside Olm signals. For groups there are two options:
 10. **Legal:** host operators store ciphertext they can't read, for people
     they may not know, and now purge on expiry. [legal.md](legal.md) doesn't
     cover that yet. **Open, pending Syd's review.**
-11. **New: disappearing timer start.** This doc counts from sending, so hosts
-    and the integrity checks share one expiry. Signal counts from reading on
-    the recipient's side. A local "from reading" timer on top is possible.
-    Is counting from sending OK?
+11. ~~**Disappearing timer start.**~~ **Decided (Chi):** Signal-style. The
+    timer starts at send on the sender's device and on hosts, and at read on
+    each recipient's device, with a hard cap of `sent + timer + 7 days` for
+    unread messages. Hosts delete at `sent + timer` or at 30-day retention,
+    whichever comes first. See [When the timer starts](#when-the-timer-starts-decided-chi).
