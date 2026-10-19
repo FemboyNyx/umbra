@@ -191,23 +191,16 @@ impl Store {
             "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;",
         )?;
         conn.execute_batch(SCHEMA)?;
-        let store = Self {
+        let mut conn = conn;
+        migrate(&mut conn)?;
+        Ok(Self {
             conn: Mutex::new(conn),
-        };
-        let v = store.meta_get_i64("schema_version")?.unwrap_or(1);
-        if v > SCHEMA_VERSION {
-            bail!("database schema {v} is newer than this build");
-        }
-        if v < 2 {
-            // v2: key-change tracking.
-            store.c().execute_batch(
-                "ALTER TABLE contacts ADD COLUMN pending_identity_key TEXT;
-                 ALTER TABLE contacts ADD COLUMN rejected_identity_key TEXT;
-                 ALTER TABLE contacts ADD COLUMN key_changed_at INTEGER;",
-            )?;
-        }
-        store.meta_set("schema_version", SCHEMA_VERSION.to_string().as_bytes())?;
-        Ok(store)
+        })
+    }
+
+    #[cfg(test)]
+    fn conn_for_test(&self) -> MutexGuard<'_, Connection> {
+        self.c()
     }
 
     fn c(&self) -> MutexGuard<'_, Connection> {
@@ -231,6 +224,7 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     fn meta_get_i64(&self, key: &str) -> Result<Option<i64>> {
         Ok(self
             .meta_get(key)?
@@ -579,6 +573,55 @@ impl Store {
     }
 }
 
+/// v2 columns on `contacts` (key-change tracking).
+const V2_CONTACT_COLUMNS: &[(&str, &str)] = &[
+    ("pending_identity_key", "TEXT"),
+    ("rejected_identity_key", "TEXT"),
+    ("key_changed_at", "INTEGER"),
+];
+
+/// Bring the schema to [`SCHEMA_VERSION`] in one transaction: the column
+/// additions and the `schema_version` bump commit together or not at all.
+/// Columns are added only if missing (`PRAGMA table_info`), so a database
+/// left half-migrated by an older build, or migrated twice, still opens.
+fn migrate(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
+    let v: i64 = tx
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    if v > SCHEMA_VERSION {
+        bail!("database schema {v} is newer than this build");
+    }
+    if v < 2 {
+        let have: std::collections::HashSet<String> = {
+            let mut st = tx.prepare("SELECT name FROM pragma_table_info('contacts')")?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (col, ty) in V2_CONTACT_COLUMNS {
+            if !have.contains(*col) {
+                tx.execute_batch(&format!("ALTER TABLE contacts ADD COLUMN {col} {ty};"))?;
+            }
+        }
+    }
+    if v < SCHEMA_VERSION {
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [SCHEMA_VERSION.to_string().into_bytes()],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,6 +728,94 @@ mod tests {
         drop(s);
         // Re-open is idempotent.
         Store::open(&path, &KEY).unwrap();
+    }
+
+    #[test]
+    fn migration_survives_partial_and_repeated_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.db");
+        let raw = || {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex::encode(KEY)))
+                .unwrap();
+            conn
+        };
+        {
+            // An older, non-transactional build crashed after the first ALTER:
+            // one v2 column exists, schema_version still says 1.
+            let conn = raw();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch(
+                "INSERT INTO meta(key, value) VALUES ('schema_version', X'31');
+                 ALTER TABLE contacts ADD COLUMN pending_identity_key TEXT;
+                 INSERT INTO contacts(peer_id, identity_key, ed25519_key, verified, added_at)
+                     VALUES ('p', 'ik1', 'ed', 1, 1);",
+            )
+            .unwrap();
+        }
+        let cols = |s: &Store| -> Vec<String> {
+            let c = s.conn_for_test();
+            let mut st = c
+                .prepare("SELECT name FROM pragma_table_info('contacts')")
+                .unwrap();
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            v
+        };
+        let s = Store::open(&path, &KEY).expect("half-migrated db opens");
+        assert_eq!(
+            s.meta_get_i64("schema_version").unwrap(),
+            Some(SCHEMA_VERSION)
+        );
+        let after = cols(&s);
+        for (c, _) in V2_CONTACT_COLUMNS {
+            assert_eq!(after.iter().filter(|x| x == c).count(), 1, "{c}");
+        }
+        s.set_pending_key("p", "ik2", 5).unwrap();
+        drop(s);
+
+        // Version marker lost but all columns present: runs again, no error.
+        raw()
+            .execute_batch("UPDATE meta SET value = X'31' WHERE key = 'schema_version'")
+            .unwrap();
+        let s = Store::open(&path, &KEY).expect("repeated migration opens");
+        assert_eq!(cols(&s), after);
+        assert_eq!(
+            s.meta_get_i64("schema_version").unwrap(),
+            Some(SCHEMA_VERSION)
+        );
+        let c = s.get_contact("p").unwrap().unwrap();
+        assert_eq!(c.pending_identity_key.as_deref(), Some("ik2"));
+        drop(s);
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_completely() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        // Columns get added, then the version bump fails (simulated crash).
+        conn.execute_batch(
+            "CREATE TRIGGER fail_bump BEFORE INSERT ON meta
+             BEGIN SELECT RAISE(ABORT, 'simulated crash'); END;",
+        )
+        .unwrap();
+        assert!(migrate(&mut conn).is_err());
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('contacts') WHERE name IN
+                 ('pending_identity_key', 'rejected_identity_key', 'key_changed_at')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "no column left behind");
+        // Next launch migrates cleanly.
+        conn.execute_batch("DROP TRIGGER fail_bump;").unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
     }
 
     #[test]
