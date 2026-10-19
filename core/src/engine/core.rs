@@ -50,6 +50,8 @@ pub struct Core {
     peer_locks: Mutex<HashMap<PeerId, Arc<tokio::sync::Mutex<()>>>>,
     limits: Limits,
     limiter: Mutex<Limiter>,
+    #[cfg_attr(not(feature = "tor"), allow(dead_code))]
+    data_dir: std::path::PathBuf,
 }
 
 /// Mutable rate-limiter state (see `engine::limits`).
@@ -136,6 +138,7 @@ impl Core {
         let store = Arc::new(Store::open(&data_dir.join(DB_FILE), db_key)?);
         let (id, crypto) = Crypto::load_or_create(store.clone(), db_key)?;
         Ok(Arc::new(Self {
+            data_dir: data_dir.to_path_buf(),
             id,
             store,
             crypto,
@@ -510,7 +513,20 @@ impl Core {
                     .with_context(|| format!("tor_socks must be ip:port, got {s}"))?,
             ),
             #[cfg(feature = "tor")]
-            None => TransportMode::TorEmbedded,
+            None => {
+                // `<data_dir>/tor/{state,cache}`. state holds arti guards and
+                // (tor-listen) the onion identity keystore: wiping it changes
+                // the .onion, so back it up with the Olm store.
+                let root = self.data_dir.join("tor");
+                let (state_dir, cache_dir) = (root.join("state"), root.join("cache"));
+                for d in [&root, &state_dir, &cache_dir] {
+                    crate::engine::net::private_dir(d)?;
+                }
+                TransportMode::TorEmbedded {
+                    state_dir,
+                    cache_dir,
+                }
+            }
             #[cfg(not(feature = "tor"))]
             None => TransportMode::Clearnet {
                 mdns: self.cfg.enable_mdns,

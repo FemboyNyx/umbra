@@ -89,15 +89,38 @@ fn make_behaviour(
     })
 }
 
+/// Onion service nickname (arti keystore namespace) for `tor-listen`.
+/// Changing it changes the `.onion` address.
+#[cfg(feature = "tor-listen")]
+pub const TOR_ONION_NICKNAME: &str = "umbra";
+
+/// Create `dir` (and parents) and restrict it to the owner (0700 on Unix);
+/// arti's fs-mistrust refuses group/world-accessible state dirs.
+#[cfg(feature = "tor")]
+pub fn private_dir(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir).map_err(|e| anyhow!("create {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| anyhow!("chmod 0700 {}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
 pub enum TransportMode {
     Clearnet {
         mdns: bool,
     },
     /// Tor via an external SOCKS5 proxy.
     TorSocks(SocketAddr),
-    /// Tor via embedded arti (`umbra-tor`, cargo feature `tor`).
+    /// Tor via embedded arti (`umbra-tor`, cargo feature `tor`), with
+    /// app-private arti state / cache dirs (created 0700 by the caller).
     #[cfg(feature = "tor")]
-    TorEmbedded,
+    TorEmbedded {
+        state_dir: std::path::PathBuf,
+        cache_dir: std::path::PathBuf,
+    },
 }
 
 impl TransportMode {
@@ -147,10 +170,19 @@ pub async fn build_swarm(
                 .build()
         }
         #[cfg(feature = "tor")]
-        TransportMode::TorEmbedded => {
-            // TODO(tor): pass app-private state/cache dirs (Android) once
-            // umbra-tor exposes them; arti defaults to platform dirs.
-            let tor = umbra_tor::TorTransport::bootstrapped()
+        TransportMode::TorEmbedded {
+            state_dir,
+            cache_dir,
+        } => {
+            // Explicit dirs: arti's XDG defaults don't exist on Android, and
+            // the onion keystore (tor-listen) must never land in a default
+            // location. The nickname is the keystore namespace; keep it stable.
+            let tor_cfg = umbra_tor::TorConfig::new()
+                .state_dir(state_dir)
+                .cache_dir(cache_dir);
+            #[cfg(feature = "tor-listen")]
+            let tor_cfg = tor_cfg.onion_nickname(TOR_ONION_NICKNAME);
+            let tor = umbra_tor::TorTransport::bootstrapped_with(tor_cfg)
                 .await
                 .map_err(|e| anyhow!("tor bootstrap: {e}"))?;
             libp2p::SwarmBuilder::with_existing_identity(keypair)
@@ -575,5 +607,22 @@ impl NetTask {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(all(test, feature = "tor", unix))]
+mod tor_dir_tests {
+    use super::private_dir;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn tor_state_dir_is_owner_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("tor").join("state");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&d).unwrap();
+        let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 }

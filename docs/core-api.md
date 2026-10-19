@@ -268,7 +268,7 @@ Notes:
 
 Tor-only when `CoreConfig.tor_socks = "ip:port"` (system tor / Orbot /
 `arti proxy`), or when built with cargo feature `tor` (embedded arti via
-`umbra-tor`; see `docs/tor.md` on the backup branch):
+`umbra-tor`; see `docs/tor.md`):
 
 * base transport is the Tor dialer **only** (never `or()`-ed with TCP/QUIC);
   no local DNS, no listening, no mDNS, no DCUtR, Kademlia client mode,
@@ -277,8 +277,30 @@ Tor-only when `CoreConfig.tor_socks = "ip:port"` (system tor / Orbot /
   `/p2p-circuit` addresses);
 * calls (`calls/`, WebRTC) are not routed through Tor — the UI must say so.
 
-To enable `tor` once `core/tor/` is on main: uncomment the `"tor"` workspace
-member, the `umbra-tor` dependency and the `tor` feature in `core/Cargo.toml`.
+Features: `tor` (embedded arti, Tor-only) and `tor-listen` (**EXPERIMENTAL**,
+implies `tor`: compiles umbra-tor's onion-service hosting and sets the onion
+nickname `"umbra"`; core does **not** call `listen_on` yet). Keep both out of
+release builds until the arti APK delta is measured.
+
+Embedded arti state (`tor` feature):
+
+* Built with `TorTransport::bootstrapped_with(TorConfig::new().state_dir(..)
+  .cache_dir(..)[.onion_nickname("umbra")])`, never arti's platform defaults
+  (those don't exist on Android).
+* Dirs: `<data_dir>/tor/state` and `<data_dir>/tor/cache`, created by
+  `start_network` and chmod'ed to **0700** on Unix (arti's fs-mistrust
+  refuses group/world-accessible dirs; Android app-private dirs already are).
+* `<data_dir>/tor/state` holds guard state and, with `tor-listen`, the onion
+  service identity keystore (`state/keystore/`). **Wiping it permanently
+  changes the `.onion` address**, so back it up and restore it together with
+  `umbra.db` (the Olm/identity store). The nickname is the keystore namespace;
+  changing it also changes the address.
+* arti 0.35 quirk: an onion service dropped **before bootstrap completed**
+  keeps its state lock until the process exits, and relaunching the same
+  nickname in that process fails with `AlreadyLocked`. Core doesn't host
+  onion services yet; once it does, don't stop and restart networking
+  (`stop_network` / `start_network`) before Tor has bootstrapped. Restart
+  the process instead.
 
 ## Mock backend (`mock: true`)
 

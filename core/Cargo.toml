@@ -77,6 +77,9 @@ default = []
 vendored-openssl = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 # Embedded arti Tor transport. Makes the swarm Tor-only (see docs/core-api.md).
 tor = ["dep:umbra-tor"]
+# EXPERIMENTAL: compiles umbra-tor's onion-service hosting and sets the onion
+# nickname. Core does not listen on an onion yet. Keep out of release builds.
+tor-listen = ["tor", "umbra-tor/tor-listen"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("tor"))', 'cfg(frb_expand)'] }
