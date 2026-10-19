@@ -109,18 +109,21 @@ private class CaptureHooks(private val activity: Activity) {
     }
 }
 
-/** Loaded only on API 29+, where [BiometricManager] exists. */
+/**
+ * Loaded only on API 29+, where [BiometricManager] exists.
+ * The public SDK no longer exposes BiometricManager.from; the instance
+ * comes from [Context.BIOMETRIC_SERVICE].
+ */
 @SuppressLint("NewApi")
 private object BiometricAvailability {
     fun enrolled(activity: Activity): Boolean {
+        val manager = activity.getSystemService(BiometricManager::class.java) ?: return false
         val code =
             if (Build.VERSION.SDK_INT >= 30) {
-                BiometricManager.from(activity).canAuthenticate(
-                    BiometricManager.Authenticators.BIOMETRIC_WEAK,
-                )
+                manager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK)
             } else {
                 @Suppress("DEPRECATION")
-                BiometricManager.from(activity).canAuthenticate()
+                manager.canAuthenticate()
             }
         return code == BiometricManager.BIOMETRIC_SUCCESS
     }
