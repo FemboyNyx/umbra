@@ -40,18 +40,27 @@ GitHub secrets:
 
 If either secret is missing, **ship zip only**. Do not publish an unsigned MSIX as the official Windows build.
 
-CI sketch:
+How `ci.yml` and `release.yml` do it: when both secrets are set, it decodes the PFX into
+`$env:RUNNER_TEMP`, then runs `dart run msix:create` in `app/` with the cert passed
+as **CLI flags** (`--certificate-path`, `--certificate-password`), plus
+`--build-windows false` (reuses the release build), `--install-certificate false`,
+and `--output-path dist`. It deletes the PFX afterward and fails if no `.msix` was
+produced. The `msix` package does not read the certificate from environment
+variables, and without a certificate it silently falls back to its self-signed
+test cert, so never put `certificate_path`/`certificate_password` in the committed
+`msix_config`.
+
+Local equivalent:
 
 ```powershell
-if ($env:WINDOWS_CERT_BASE64 -and $env:WINDOWS_CERT_PASSWORD) {
-  $pfx = Join-Path $env:RUNNER_TEMP "umbra.pfx"
-  [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
-  # Point msix_config.certificate_path / certificate_password at $pfx and the secret,
-  # then: flutter pub run msix:create
-} else {
-  Write-Warning "WINDOWS_CERT_* secrets absent; shipping zip only"
-}
+cd app
+flutter build windows --release
+dart run msix:create --certificate-path C:\path\to\umbra.pfx `
+  --certificate-password <password> --build-windows false --install-certificate false
 ```
+
+Note: until the `WINDOWS_CERT_*` secrets are added to the repo, both workflows
+skip MSIX and ship the zip only, so the signing path stays untested until then.
 
 `*.pfx` is gitignored at the repo root.
 
