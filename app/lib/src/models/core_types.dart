@@ -19,7 +19,7 @@ enum SignalKind {
 }
 
 /// Where a changed identity key was seen.
-enum KeyChangeSource { hello, keyClaim, contactCard }
+enum KeyChangeSource { hello, keyClaim, contactCard, roster }
 
 /// Wire names from `core` `SignalKind` (`Offer`, `Answer`, …).
 ///

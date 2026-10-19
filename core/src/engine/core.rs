@@ -19,7 +19,8 @@ use crate::engine::events::EventHub;
 use crate::engine::limits::{KeyedBuckets, Limits, TokenBucket};
 use crate::engine::net::{self, NetConfig, NetHandle, TransportMode};
 use crate::engine::proto::*;
-use crate::engine::store::{ContactRow, Store};
+use crate::engine::servers::*;
+use crate::engine::store::{CoMemberRow, ContactRow, MembershipRow, Store};
 use crate::engine::util::{now_ms, unb64};
 use crate::engine::{qr, safety};
 
@@ -52,6 +53,54 @@ pub struct Core {
     limiter: Mutex<Limiter>,
     #[cfg_attr(not(feature = "tor"), allow(dead_code))]
     data_dir: std::path::PathBuf,
+    /// Engine-internal consumers of server payloads (Phase 1 server logic,
+    /// tests). Never crosses the FFI.
+    server_subs: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<ServerInbound>>>,
+}
+
+/// Everything we trust about one peer's keys, across its contact record and
+/// all its co-member records. The contact pin is authoritative; co-member
+/// records are kept equal to it (mismatches raise `KeyChanged`).
+struct Pin {
+    peer_id: String,
+    ed25519_key: String,
+    identity_key: String,
+    contact: Option<ContactRow>,
+    rows: Vec<CoMemberRow>,
+}
+
+impl Pin {
+    fn knows(&self, key: &str) -> bool {
+        let c = self.contact.iter().any(|c| {
+            c.pending_identity_key.as_deref() == Some(key)
+                || c.rejected_identity_key.as_deref() == Some(key)
+        });
+        c || self.rows.iter().any(|r| {
+            r.pending_identity_key.as_deref() == Some(key)
+                || r.rejected_identity_key.as_deref() == Some(key)
+        })
+    }
+
+    fn key_change_pending(&self) -> bool {
+        self.contact
+            .iter()
+            .any(|c| c.pending_identity_key.is_some())
+            || self.rows.iter().any(|r| r.pending_identity_key.is_some())
+    }
+
+    /// Server traffic for `server_id` is allowed: a co-member record exists,
+    /// is signed, no key change is pending anywhere, and all copies agree.
+    fn server_ok(&self, server_id: &str) -> bool {
+        !self.key_change_pending()
+            && self
+                .rows
+                .iter()
+                .any(|r| r.server_id == server_id && r.card_sig.is_some())
+            && self
+                .rows
+                .iter()
+                .all(|r| r.identity_key == self.identity_key)
+    }
 }
 
 /// Mutable rate-limiter state (see `engine::limits`).
@@ -148,6 +197,7 @@ impl Core {
             peer_locks: Mutex::new(HashMap::new()),
             limiter: Mutex::new(Limiter::new(&limits)),
             limits,
+            server_subs: Mutex::new(Vec::new()),
         }))
     }
 
@@ -247,9 +297,13 @@ impl Core {
 
     /// Safety number this contact would have with `identity_key`.
     fn safety_with_key(&self, c: &ContactRow, identity_key: &str) -> String {
+        self.safety_for_keys(&c.peer_id, &c.ed25519_key, identity_key)
+    }
+
+    fn safety_for_keys(&self, peer_id: &str, ed25519_key: &str, identity_key: &str) -> String {
         let theirs = (|| -> Result<String> {
-            let peer = parse_peer(&c.peer_id)?;
-            let ed = unb64(&c.ed25519_key)?;
+            let peer = parse_peer(peer_id)?;
+            let ed = unb64(ed25519_key)?;
             let ik = Curve25519PublicKey::from_base64(identity_key)?;
             Ok(fingerprint_of(&peer, &ed, &ik))
         })()
@@ -257,15 +311,36 @@ impl Core {
         safety::safety_number(&self.id.fp_digits, &theirs)
     }
 
-    /// A known contact presented `presented_ik` instead of its trusted key.
-    /// Never trusts it: flags the contact and emits `KeyChanged` once per
-    /// distinct key. Keys the user rejected are ignored silently.
+    /// Current pin for `peer_id`, if it is a contact and/or a co-member.
+    fn pin(&self, peer_id: &str) -> Result<Option<Pin>> {
+        let contact = self.store.get_contact(peer_id)?;
+        let rows = self.store.co_member_rows(peer_id)?;
+        let (ed, ik) = match (&contact, rows.first()) {
+            (Some(c), _) => (c.ed25519_key.clone(), c.identity_key.clone()),
+            (None, Some(r)) => (r.ed25519_key.clone(), r.identity_key.clone()),
+            (None, None) => return Ok(None),
+        };
+        Ok(Some(Pin {
+            peer_id: peer_id.to_string(),
+            ed25519_key: ed,
+            identity_key: ik,
+            contact,
+            rows,
+        }))
+    }
+
+    /// A known peer (contact and/or co-member) presented `presented_ik`
+    /// instead of its trusted key. Never trusts it: flags every record of the
+    /// peer and emits `KeyChanged` once per distinct key. Keys the user
+    /// rejected are ignored silently.
     ///
     /// `presented_sig` is the card v2 signature that came with the new key
-    /// (already verified by `validate_card`), if any.
+    /// (already verified by `validate_card`), if any. Co-member records only
+    /// take signed keys; an unsigned change of a co-member-only peer is
+    /// refused without an alert (no evidence it came from the device key).
     fn on_key_mismatch(
         &self,
-        c: &ContactRow,
+        pin: &Pin,
         presented_ik: &str,
         presented_sig: Option<&str>,
         source: KeyChangeSource,
@@ -273,38 +348,56 @@ impl Core {
         if Curve25519PublicKey::from_base64(presented_ik).is_err() {
             return;
         }
-        tracing::warn!(peer = %c.peer_id, ?source, "contact presented a different identity key");
-        if c.rejected_identity_key.as_deref() == Some(presented_ik)
-            || c.pending_identity_key.as_deref() == Some(presented_ik)
-        {
+        tracing::warn!(peer = %pin.peer_id, ?source, "peer presented a different identity key");
+        if pin.knows(presented_ik) {
             return;
         }
-        if let Err(e) =
-            self.store
+        let mut flagged = false;
+        if let Some(c) = &pin.contact {
+            match self
+                .store
                 .set_pending_key(&c.peer_id, presented_ik, presented_sig, now_ms())
-        {
-            tracing::error!("store pending key: {e:#}");
+            {
+                Ok(()) => flagged = true,
+                Err(e) => tracing::error!("store pending key: {e:#}"),
+            }
+        }
+        if let (false, Some(sig)) = (pin.rows.is_empty(), presented_sig) {
+            match self
+                .store
+                .co_member_set_pending(&pin.peer_id, presented_ik, sig)
+            {
+                Ok(()) => flagged = true,
+                Err(e) => tracing::error!("store pending co-member key: {e:#}"),
+            }
+        }
+        if !flagged {
             return;
         }
         self.events.emit(CoreEvent::KeyChanged {
-            peer_id: c.peer_id.clone(),
-            old_identity_key: c.identity_key.clone(),
+            peer_id: pin.peer_id.clone(),
+            old_identity_key: pin.identity_key.clone(),
             new_identity_key: presented_ik.to_string(),
-            old_safety_number: self.safety_for(c),
-            new_safety_number: self.safety_with_key(c, presented_ik),
+            old_safety_number: self.safety_for_keys(
+                &pin.peer_id,
+                &pin.ed25519_key,
+                &pin.identity_key,
+            ),
+            new_safety_number: self.safety_for_keys(&pin.peer_id, &pin.ed25519_key, presented_ik),
             source,
         });
     }
 
-    /// Trust the contact's pending new identity key. Old Olm sessions are
-    /// dropped, the contact becomes unverified, and queued messages are
-    /// re-sent under the new key.
+    /// Trust the peer's pending new identity key (contact and/or co-member
+    /// records together). Old Olm sessions are dropped, a contact becomes
+    /// unverified, and queued messages are re-sent under the new key.
+    /// Contacts only (errors without side effects otherwise); co-member-only
+    /// peers use [`Self::accept_key_change_any`].
     pub fn accept_key_change(self: &Arc<Self>, peer_id: &str) -> Result<Contact> {
-        let peer = parse_peer(peer_id)?;
-        self.store.accept_pending_key(peer_id)?;
-        self.crypto.forget_sessions(peer_id)?;
-        self.ns().greeted.remove(&peer);
-        self.spawn_flush(peer);
+        if self.store.get_contact(peer_id)?.is_none() {
+            bail!("{peer_id} is not a contact");
+        }
+        self.accept_key_change_any(peer_id)?;
         let row = self
             .store
             .get_contact(peer_id)?
@@ -312,10 +405,56 @@ impl Core {
         Ok(self.to_contact(row))
     }
 
+    /// [`Self::accept_key_change`] for any pinned peer.
+    pub fn accept_key_change_any(self: &Arc<Self>, peer_id: &str) -> Result<()> {
+        let peer = parse_peer(peer_id)?;
+        let pin = self
+            .pin(peer_id)?
+            .ok_or_else(|| anyhow!("unknown peer {peer_id}"))?;
+        let (key, sig) = if let Some(c) = pin
+            .contact
+            .as_ref()
+            .filter(|c| c.pending_identity_key.is_some())
+        {
+            let key = c.pending_identity_key.clone().expect("checked");
+            let sig = c.pending_card_sig.clone();
+            self.store.accept_pending_key(peer_id)?;
+            (key, sig)
+        } else if let Some(r) = pin.rows.iter().find(|r| r.pending_identity_key.is_some()) {
+            (
+                r.pending_identity_key.clone().expect("checked"),
+                r.pending_card_sig.clone(),
+            )
+        } else {
+            bail!("no pending key change for {peer_id}");
+        };
+        if !pin.rows.is_empty() {
+            self.store
+                .co_member_set_key(peer_id, &key, sig.as_deref())?;
+        }
+        self.crypto.forget_sessions(peer_id)?;
+        self.ns().greeted.remove(&peer);
+        self.spawn_flush(peer);
+        Ok(())
+    }
+
     /// Keep the old key. The refused key is remembered and won't alert again;
     /// a different new key will.
     pub fn reject_key_change(&self, peer_id: &str) -> Result<()> {
-        self.store.reject_pending_key(peer_id)
+        let pin = self
+            .pin(peer_id)?
+            .ok_or_else(|| anyhow!("unknown peer {peer_id}"))?;
+        if !pin.key_change_pending() {
+            bail!("no pending key change for {peer_id}");
+        }
+        if pin
+            .contact
+            .as_ref()
+            .is_some_and(|c| c.pending_identity_key.is_some())
+        {
+            self.store.reject_pending_key(peer_id)?;
+        }
+        self.store.co_member_reject(peer_id)
     }
 
     fn to_contact(&self, row: ContactRow) -> Contact {
@@ -337,15 +476,22 @@ impl Core {
         if peer == self.id.peer_id {
             bail!("cannot add yourself as a contact");
         }
-        if let Some(existing) = self.store.get_contact(&card.peer_id)? {
+        if let Some(pin) = self.pin(&card.peer_id)? {
             // Same PeerId implies same ed25519 key (validated), so only the
-            // Olm identity key can differ.
-            if existing.card_sig.is_some() && card.sig.is_none() {
-                bail!("unsigned (v1) card for a contact we hold a signed card for; refusing downgrade");
+            // Olm identity key can differ. Pins carry over from co-member
+            // records too (a co-member being added as a contact).
+            let signed = pin
+                .contact
+                .as_ref()
+                .map_or(!pin.rows.is_empty(), |c| c.card_sig.is_some());
+            if signed && card.sig.is_none() {
+                bail!(
+                    "unsigned (v1) card for a peer we hold a signed card for; refusing downgrade"
+                );
             }
-            if existing.identity_key != card.identity_key {
+            if pin.identity_key != card.identity_key {
                 self.on_key_mismatch(
-                    &existing,
+                    &pin,
                     &card.identity_key,
                     card.sig.as_deref(),
                     KeyChangeSource::ContactCard,
@@ -408,8 +554,205 @@ impl Core {
     }
 
     pub fn remove_contact(&self, peer_id: &str) -> Result<()> {
-        self.crypto.forget_sessions(peer_id)?;
-        self.store.remove_contact(peer_id)
+        // The Olm channel stays if we still share a server with the peer.
+        let co_member = !self.store.co_member_rows(peer_id)?.is_empty();
+        if !co_member {
+            self.crypto.forget_sessions(peer_id)?;
+        }
+        self.store.remove_contact(peer_id, co_member)
+    }
+
+    // ---------------------------------------------------------------- servers
+
+    /// Record that we are in `server_id`, using `identity` (explicit; see
+    /// [`ServerIdentity`]). Idempotent for the same identity; the identity of
+    /// a membership can't change. `history` is stored only.
+    pub fn add_server_membership(
+        &self,
+        server_id: &str,
+        identity: ServerIdentity,
+        history: Option<HistoryVisibility>,
+    ) -> Result<ServerMembership> {
+        validate_server_id(server_id)?;
+        if identity == ServerIdentity::Dedicated {
+            bail!("per-server (dedicated) identities are not supported yet");
+        }
+        if let Some(m) = self.store.get_membership(server_id)? {
+            if m.identity != identity.as_str() {
+                bail!(
+                    "server {server_id} already uses the {} identity",
+                    m.identity
+                );
+            }
+        }
+        self.store.upsert_membership(&MembershipRow {
+            server_id: server_id.to_string(),
+            identity: identity.as_str().to_string(),
+            history_visibility: history.map(|h| h.as_str().to_string()),
+            joined_at: now_ms(),
+        })?;
+        self.server_membership(server_id)?
+            .ok_or_else(|| anyhow!("membership vanished"))
+    }
+
+    pub fn server_membership(&self, server_id: &str) -> Result<Option<ServerMembership>> {
+        Ok(self
+            .store
+            .get_membership(server_id)?
+            .map(|m| ServerMembership {
+                identity: ServerIdentity::parse(&m.identity).unwrap_or(ServerIdentity::Default),
+                history_visibility: m
+                    .history_visibility
+                    .as_deref()
+                    .and_then(HistoryVisibility::parse),
+                server_id: m.server_id,
+                joined_at_ms: m.joined_at,
+            }))
+    }
+
+    /// Per-server history visibility for new members (stored only).
+    pub fn set_server_history(
+        &self,
+        server_id: &str,
+        history: Option<HistoryVisibility>,
+    ) -> Result<()> {
+        let mut m = self
+            .store
+            .get_membership(server_id)?
+            .ok_or_else(|| anyhow!("not a member of {server_id}"))?;
+        m.history_visibility = history.map(|h| h.as_str().to_string());
+        self.store.upsert_membership(&m)
+    }
+
+    /// Add a co-member of `server_id` from its roster card. The card must be
+    /// card v2 (signed). Never creates a contact. If we already pin a
+    /// different key for this peer (as a contact or in another server) the
+    /// card is refused and `KeyChanged { source: Roster }` is raised.
+    pub fn add_co_member(self: &Arc<Self>, server_id: &str, card: ContactCard) -> Result<CoMember> {
+        if self.store.get_membership(server_id)?.is_none() {
+            bail!("not a member of {server_id}");
+        }
+        let peer = qr::validate_card(&card)?;
+        let Some(sig) = card.sig.clone() else {
+            bail!("co-members need a signed (v2) card");
+        };
+        if peer == self.id.peer_id {
+            bail!("cannot add yourself as a co-member");
+        }
+        if let Some(pin) = self.pin(&card.peer_id)? {
+            if pin.identity_key != card.identity_key {
+                self.on_key_mismatch(
+                    &pin,
+                    &card.identity_key,
+                    Some(&sig),
+                    KeyChangeSource::Roster,
+                );
+                bail!(
+                    "this member's identity key differs from the one we trust; compare safety \
+                     numbers, then call accept_key_change or reject_key_change"
+                );
+            }
+        }
+        let row = CoMemberRow {
+            server_id: server_id.to_string(),
+            peer_id: card.peer_id.clone(),
+            display_name: card.display_name.clone().unwrap_or_default(),
+            identity_key: card.identity_key.clone(),
+            ed25519_key: card.ed25519_key.clone(),
+            card_sig: Some(sig),
+            addrs: card.addrs.clone(),
+            added_at: now_ms(),
+            pending_identity_key: None,
+            pending_card_sig: None,
+            rejected_identity_key: None,
+        };
+        self.store.upsert_co_member(&row)?;
+        // Records of the same peer share key-change state.
+        if let Some(p) = self
+            .store
+            .co_member_rows(&card.peer_id)?
+            .into_iter()
+            .find(|r| r.pending_identity_key.is_some())
+        {
+            if let (Some(k), Some(s)) = (&p.pending_identity_key, &p.pending_card_sig) {
+                self.store.co_member_set_pending(&card.peer_id, k, s)?;
+            }
+        }
+        if let Some(h) = self.ns().handle.clone() {
+            h.add_addrs(peer, parse_addrs(&card.addrs));
+        }
+        self.co_member(server_id, &card.peer_id)?
+            .ok_or_else(|| anyhow!("co-member vanished"))
+    }
+
+    /// Remove one co-member record. When the peer is in no shared server and
+    /// is not a contact, its Olm sessions are dropped too.
+    pub fn remove_co_member(&self, server_id: &str, peer_id: &str) -> Result<()> {
+        if !self.store.remove_co_member(server_id, peer_id)? {
+            bail!("{peer_id} is not a co-member of {server_id}");
+        }
+        if self.store.co_member_rows(peer_id)?.is_empty()
+            && self.store.get_contact(peer_id)?.is_none()
+        {
+            self.crypto.forget_sessions(peer_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn co_member(&self, server_id: &str, peer_id: &str) -> Result<Option<CoMember>> {
+        Ok(self
+            .list_co_members(Some(server_id))?
+            .into_iter()
+            .find(|m| m.peer_id == peer_id))
+    }
+
+    /// Co-members of one server, or of all servers.
+    pub fn list_co_members(&self, server_id: Option<&str>) -> Result<Vec<CoMember>> {
+        Ok(self
+            .store
+            .list_co_members(server_id)?
+            .into_iter()
+            .map(|r| CoMember {
+                is_contact: self.store.get_contact(&r.peer_id).ok().flatten().is_some(),
+                signed_card: r.card_sig.is_some(),
+                key_changed: r.pending_identity_key.is_some(),
+                server_id: r.server_id,
+                peer_id: r.peer_id,
+                display_name: r.display_name,
+                identity_key: r.identity_key,
+                ed25519_key: r.ed25519_key,
+                addrs: r.addrs,
+                added_at_ms: r.added_at,
+                pending_identity_key: r.pending_identity_key,
+            })
+            .collect())
+    }
+
+    /// Receive server payloads from co-members (engine-internal).
+    pub fn subscribe_server(&self) -> tokio::sync::mpsc::UnboundedReceiver<ServerInbound> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.server_subs
+            .lock()
+            .expect("server subs poisoned")
+            .push(tx);
+        rx
+    }
+
+    fn emit_server(&self, msg: ServerInbound) {
+        self.server_subs
+            .lock()
+            .expect("server subs poisoned")
+            .retain(|tx| tx.send(msg.clone()).is_ok());
+    }
+
+    fn is_known_peer(&self, peer: &PeerId) -> bool {
+        let pid = peer.to_base58();
+        self.is_contact(peer)
+            || self
+                .store
+                .co_member_rows(&pid)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
     }
 
     // ---------------------------------------------------------------- messages
@@ -749,20 +1092,55 @@ impl Core {
             Ok(p) if p == peer => {}
             _ => return MsgResponse::Rejected(RejectReason::Malformed),
         }
-        match self.store.get_contact(&card.peer_id) {
-            Ok(Some(c)) => {
+        let pin = match self.pin(&card.peer_id) {
+            Ok(p) => p,
+            Err(_) => return MsgResponse::Rejected(RejectReason::Internal),
+        };
+        // Co-member that is not a contact: completes Hello, never becomes a
+        // contact and never raises ContactRequest.
+        if let Some(pin) = pin.as_ref().filter(|p| p.contact.is_none()) {
+            if card.sig.is_none() {
+                return MsgResponse::Rejected(RejectReason::Malformed);
+            }
+            if pin.identity_key != card.identity_key {
+                self.on_key_mismatch(
+                    pin,
+                    &card.identity_key,
+                    card.sig.as_deref(),
+                    KeyChangeSource::Hello,
+                );
+                return MsgResponse::Rejected(RejectReason::KeyMismatch);
+            }
+            let _ = self
+                .store
+                .co_member_seen(&card.peer_id, &card.addrs, card.sig.as_deref());
+            if let Some(h) = self.ns().handle.clone() {
+                h.add_addrs(peer, parse_addrs(&card.addrs));
+            }
+            if self.has_outbox(&peer) {
+                self.spawn_flush(peer);
+            }
+            return MsgResponse::Ok;
+        }
+        match pin.and_then(|p| p.contact.clone().map(|c| (p, c))) {
+            Some((pin, c)) => {
                 // No downgrade: once we hold a signed card, unsigned ones are refused.
                 if c.card_sig.is_some() && card.sig.is_none() {
                     return MsgResponse::Rejected(RejectReason::Malformed);
                 }
                 if c.identity_key != card.identity_key {
                     self.on_key_mismatch(
-                        &c,
+                        &pin,
                         &card.identity_key,
                         card.sig.as_deref(),
                         KeyChangeSource::Hello,
                     );
                     return MsgResponse::Rejected(RejectReason::KeyMismatch);
+                }
+                if !pin.rows.is_empty() {
+                    let _ =
+                        self.store
+                            .co_member_seen(&card.peer_id, &card.addrs, card.sig.as_deref());
                 }
                 // Upgrade a legacy contact to a signed card (already verified).
                 if let Some(sig) = card.sig.as_deref() {
@@ -784,13 +1162,12 @@ impl Core {
                 }
                 MsgResponse::Ok
             }
-            Ok(None) => {
+            None => {
                 if self.admit_contact_request(peer) {
                     self.events.emit(CoreEvent::ContactRequest { card });
                 }
                 MsgResponse::Rejected(RejectReason::NotAContact)
             }
-            Err(_) => MsgResponse::Rejected(RejectReason::Internal),
         }
     }
 
@@ -831,10 +1208,10 @@ impl Core {
 
     fn on_olm(self: &Arc<Self>, peer: PeerId, t: u8, c: &[u8]) -> Result<MsgResponse> {
         let pid = peer.to_base58();
-        let Some(contact) = self.store.get_contact(&pid)? else {
+        let Some(pin) = self.pin(&pid)? else {
             return Ok(MsgResponse::Rejected(RejectReason::NotAContact));
         };
-        let ik = Curve25519PublicKey::from_base64(&contact.identity_key)?;
+        let ik = Curve25519PublicKey::from_base64(&pin.identity_key)?;
         let (pt, consumed) = self.crypto.decrypt_ex(&pid, ik, t, c)?;
         if let Some(k) = consumed {
             if let Some(v) = self.lim().outstanding_otks.get_mut(&peer) {
@@ -848,7 +1225,40 @@ impl Core {
         if p.to != self.id.peer_id.to_base58() {
             return Ok(MsgResponse::Rejected(RejectReason::Malformed));
         }
+        // DMs and calls are for contacts only. A co-member who isn't a
+        // contact gets the contact-request treatment (servers.md, open Q 6).
+        if pin.contact.is_none() && !matches!(p.body, PayloadBody::Server { .. }) {
+            if matches!(p.body, PayloadBody::Text { .. }) && self.admit_contact_request(peer) {
+                if let Some(card) = pin.rows.first().map(co_member_card) {
+                    self.events.emit(CoreEvent::ContactRequest { card });
+                }
+            }
+            return Ok(MsgResponse::Rejected(RejectReason::NotAContact));
+        }
         match p.body {
+            PayloadBody::Server {
+                server_id,
+                kind,
+                data,
+            } => {
+                if !pin.server_ok(&server_id) {
+                    return Ok(MsgResponse::Rejected(RejectReason::NotAMember));
+                }
+                let Ok(data) = unb64(&data) else {
+                    return Ok(MsgResponse::Rejected(RejectReason::Malformed));
+                };
+                if data.len() > MAX_SERVER_PAYLOAD_BYTES {
+                    return Ok(MsgResponse::Rejected(RejectReason::Malformed));
+                }
+                self.emit_server(ServerInbound {
+                    peer_id: pid,
+                    server_id,
+                    kind,
+                    data,
+                    id: p.id,
+                    ts: p.ts,
+                });
+            }
             PayloadBody::Text { text } => {
                 if text.len() > MAX_TEXT_BYTES {
                     return Ok(MsgResponse::Rejected(RejectReason::Malformed));
@@ -888,8 +1298,9 @@ impl Core {
     pub(crate) fn handle_keys(&self, peer: PeerId, req: KeysRequest) -> KeysResponse {
         match req {
             KeysRequest::ClaimOneTimeKey => {
-                // Contacts only, so strangers never occupy limiter state.
-                if !self.is_contact(&peer) {
+                // Contacts and co-members only, so strangers never occupy
+                // limiter state. Both share the same per-peer limits.
+                if !self.is_known_peer(&peer) {
                     return KeysResponse::Refused(RejectReason::NotAContact);
                 }
                 if !self.lim().otk_claims.try_take(&peer, Instant::now()) {
@@ -988,11 +1399,9 @@ impl Core {
             } => {
                 if identity_key != contact.identity_key {
                     // Re-read so pending/rejected state is current.
-                    let c = self
-                        .store
-                        .get_contact(&contact.peer_id)?
-                        .unwrap_or(contact.clone());
-                    self.on_key_mismatch(&c, &identity_key, None, KeyChangeSource::KeyClaim);
+                    if let Some(pin) = self.pin(&contact.peer_id)? {
+                        self.on_key_mismatch(&pin, &identity_key, None, KeyChangeSource::KeyClaim);
+                    }
                     return Err(DeliverError::Retry(anyhow!(
                         "peer presented a different identity key"
                     )));
@@ -1097,10 +1506,23 @@ impl Core {
     }
 }
 
+/// The card we hold for a co-member (for a `ContactRequest`).
+fn co_member_card(r: &CoMemberRow) -> ContactCard {
+    ContactCard {
+        peer_id: r.peer_id.clone(),
+        identity_key: r.identity_key.clone(),
+        ed25519_key: r.ed25519_key.clone(),
+        addrs: r.addrs.clone(),
+        display_name: (!r.display_name.is_empty()).then(|| r.display_name.clone()),
+        sig: r.card_sig.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::limits::*;
+    use crate::engine::util::b64;
 
     pub(crate) fn open(
         key: u8,
@@ -1257,6 +1679,265 @@ mod tests {
         assert_eq!(c.identity_key, ik2.to_base64());
         assert!(c.signed_card && !c.verified);
         assert_eq!(a.handle_msg(pb, hello(&rotated)), MsgResponse::Ok);
+    }
+
+    /// `from` opens an Olm session to `to` (claims a key from it).
+    fn open_session(to: &Arc<Core>, from: &Arc<Core>) -> KeysResponse {
+        let r = to.handle_keys(from.peer_id(), KeysRequest::ClaimOneTimeKey);
+        if let KeysResponse::Key {
+            identity_key,
+            one_time_key,
+        } = &r
+        {
+            let pts = to.peer_id().to_base58();
+            from.crypto.forget_sessions(&pts).unwrap();
+            from.crypto
+                .create_outbound(
+                    &pts,
+                    Curve25519PublicKey::from_base64(identity_key).unwrap(),
+                    Curve25519PublicKey::from_base64(one_time_key).unwrap(),
+                )
+                .unwrap();
+        }
+        r
+    }
+
+    /// Encrypt `body` from `from` to `to` on the existing session.
+    fn send_body(to: &Arc<Core>, from: &Arc<Core>, body: PayloadBody) -> MsgResponse {
+        let pts = to.peer_id().to_base58();
+        let p = Payload {
+            v: 1,
+            to: pts.clone(),
+            id: uuid::Uuid::new_v4().to_string(),
+            ts: now_ms(),
+            body,
+        };
+        let (t, c) = from
+            .crypto
+            .encrypt(&pts, &serde_json::to_vec(&p).unwrap())
+            .unwrap();
+        to.handle_msg(from.peer_id(), MsgRequest::Olm { t, c })
+    }
+
+    fn server_body(server_id: &str, data: &[u8]) -> PayloadBody {
+        PayloadBody::Server {
+            server_id: server_id.into(),
+            kind: ServerPayloadKind::ServerOp,
+            data: b64(data),
+        }
+    }
+
+    fn rotated_card(core: &Arc<Core>) -> ContactCard {
+        let mut c = ContactCard {
+            identity_key: vodozemac::olm::Account::new().curve25519_key().to_base64(),
+            ..core.self_card()
+        };
+        qr::sign_card(&core.id.keypair, &mut c).unwrap();
+        c
+    }
+
+    #[tokio::test]
+    async fn co_members_get_sessions_but_are_not_contacts() {
+        let (a, mut rx, _da) = open(1);
+        let mut srv = a.subscribe_server();
+        let (b, _rb, _db) = open(2);
+        let (c, _rc, _dc) = open(3);
+        let pb = b.peer_id();
+
+        // Membership is explicit about which identity it uses.
+        assert!(a
+            .add_server_membership("srv1", ServerIdentity::Dedicated, None)
+            .is_err());
+        let m = a
+            .add_server_membership("srv1", ServerIdentity::Default, None)
+            .unwrap();
+        assert_eq!(
+            (m.identity, m.history_visibility),
+            (ServerIdentity::Default, None)
+        );
+        a.set_server_history("srv1", Some(HistoryVisibility::Shared))
+            .unwrap();
+        assert_eq!(
+            a.server_membership("srv1")
+                .unwrap()
+                .unwrap()
+                .history_visibility,
+            Some(HistoryVisibility::Shared)
+        );
+        assert!(a
+            .add_server_membership("bad id!", ServerIdentity::Default, None)
+            .is_err());
+
+        // Co-members need a membership and a signed card.
+        assert!(a.add_co_member("srv2", b.self_card()).is_err());
+        let unsigned = ContactCard {
+            sig: None,
+            ..b.self_card()
+        };
+        assert!(a.add_co_member("srv1", unsigned).is_err());
+        let m = a.add_co_member("srv1", b.self_card()).unwrap();
+        assert!(m.signed_card && !m.is_contact && !m.key_changed);
+        assert!(a.list_contacts().unwrap().is_empty(), "never a contact");
+
+        // Hello completes without a ContactRequest; key claims are served.
+        assert_eq!(a.handle_msg(pb, hello(&b.self_card())), MsgResponse::Ok);
+        assert!(matches!(open_session(&a, &b), KeysResponse::Key { .. }));
+
+        // Server payloads for our shared server are delivered, bound to the
+        // Olm sender; other servers are refused.
+        assert_eq!(
+            send_body(&a, &b, server_body("srv1", b"op")),
+            MsgResponse::Delivered
+        );
+        let got = srv.try_recv().unwrap();
+        assert_eq!(
+            (
+                got.peer_id.as_str(),
+                got.server_id.as_str(),
+                got.data.as_slice()
+            ),
+            (pb.to_base58().as_str(), "srv1", &b"op"[..])
+        );
+        assert_eq!(
+            send_body(&a, &b, server_body("srv2", b"op")),
+            MsgResponse::Rejected(RejectReason::NotAMember)
+        );
+
+        // DMs and calls from a co-member who isn't a contact are refused; a
+        // DM is surfaced as one contact request, nothing is stored.
+        let text = || PayloadBody::Text { text: "hi".into() };
+        assert_eq!(
+            send_body(&a, &b, text()),
+            MsgResponse::Rejected(RejectReason::NotAContact)
+        );
+        assert_eq!(
+            send_body(&a, &b, text()),
+            MsgResponse::Rejected(RejectReason::NotAContact)
+        );
+        let signal = PayloadBody::Signal {
+            call_id: "c".into(),
+            kind: SignalKind::Ringing,
+            payload: String::new(),
+        };
+        assert_eq!(
+            send_body(&a, &b, signal),
+            MsgResponse::Rejected(RejectReason::NotAContact)
+        );
+        assert_eq!(requests(&drain(&mut rx)), 1);
+        assert!(a
+            .list_messages(&pb.to_base58(), None, 10)
+            .unwrap()
+            .is_empty());
+        assert!(a.list_contacts().unwrap().is_empty());
+
+        // Same per-peer limits as contacts: OTK claims are throttled.
+        let limited = (0..OTK_CLAIM_BURST)
+            .map(|_| a.handle_keys(pb, KeysRequest::ClaimOneTimeKey))
+            .filter(|r| *r == KeysResponse::Refused(RejectReason::RateLimited))
+            .count();
+        assert_eq!(limited, 1);
+
+        // Strangers are unaffected: still a contact request, no keys.
+        assert_eq!(
+            a.handle_keys(c.peer_id(), KeysRequest::ClaimOneTimeKey),
+            KeysResponse::Refused(RejectReason::NotAContact)
+        );
+
+        // Removing the record makes B a stranger again.
+        a.remove_co_member("srv1", &pb.to_base58()).unwrap();
+        assert_eq!(
+            a.handle_msg(pb, hello(&b.self_card())),
+            MsgResponse::Rejected(RejectReason::NotAContact)
+        );
+    }
+
+    #[tokio::test]
+    async fn co_member_key_pins_carry_over_and_block_server_traffic() {
+        let (a, mut rx, _da) = open_lim(
+            1,
+            Limits {
+                hello_burst: 100,
+                ..Limits::default()
+            },
+        );
+        let mut srv = a.subscribe_server();
+        let (b, _rb, _db) = open(2);
+        let pb = b.peer_id();
+        let pbs = pb.to_base58();
+        for s in ["srv1", "srv2"] {
+            a.add_server_membership(s, ServerIdentity::Default, None)
+                .unwrap();
+        }
+        a.add_co_member("srv1", b.self_card()).unwrap();
+        assert!(matches!(open_session(&a, &b), KeysResponse::Key { .. }));
+
+        // Another server's roster carries a different key for B: refused,
+        // alert raised, and server traffic with B stops in every server.
+        let rotated = rotated_card(&b);
+        assert!(a.add_co_member("srv2", rotated.clone()).is_err());
+        let evs = drain(&mut rx);
+        let kc = key_changes(&evs);
+        assert_eq!(kc.len(), 1);
+        assert!(matches!(
+            kc[0],
+            CoreEvent::KeyChanged {
+                source: KeyChangeSource::Roster,
+                ..
+            }
+        ));
+        assert!(a.co_member("srv1", &pbs).unwrap().unwrap().key_changed);
+        assert_eq!(
+            send_body(&a, &b, server_body("srv1", b"x")),
+            MsgResponse::Rejected(RejectReason::NotAMember)
+        );
+        // The same key by Hello: refused, no second alert.
+        assert_eq!(
+            a.handle_msg(pb, hello(&rotated)),
+            MsgResponse::Rejected(RejectReason::KeyMismatch)
+        );
+        assert!(key_changes(&drain(&mut rx)).is_empty());
+
+        // Reject: the old pin stays and traffic resumes.
+        a.reject_key_change(&pbs).unwrap();
+        assert_eq!(
+            send_body(&a, &b, server_body("srv1", b"x")),
+            MsgResponse::Delivered
+        );
+        assert!(srv.try_recv().is_ok());
+
+        // B becomes a contact too (same key): one pin for both classes.
+        a.add_contact(b.self_card(), false).await.unwrap();
+        assert!(a.co_member("srv1", &pbs).unwrap().unwrap().is_contact);
+        // A contact card with another key is checked against the same pin.
+        let rotated2 = rotated_card(&b);
+        assert_eq!(
+            a.handle_msg(pb, hello(&rotated2)),
+            MsgResponse::Rejected(RejectReason::KeyMismatch)
+        );
+        assert_eq!(key_changes(&drain(&mut rx)).len(), 1);
+        let c = &a.list_contacts().unwrap()[0];
+        assert!(c.key_changed);
+        assert!(a.co_member("srv1", &pbs).unwrap().unwrap().key_changed);
+        // DMs keep the old key (as before); server traffic is blocked.
+        assert_eq!(
+            send_body(&a, &b, server_body("srv1", b"x")),
+            MsgResponse::Rejected(RejectReason::NotAMember)
+        );
+        assert_eq!(
+            send_body(&a, &b, PayloadBody::Text { text: "dm".into() }),
+            MsgResponse::Delivered
+        );
+
+        // Accept updates every record of B together; never re-trusted silently.
+        let c = a.accept_key_change(&pbs).unwrap();
+        assert_eq!(c.identity_key, rotated2.identity_key);
+        assert!(!c.verified && c.signed_card);
+        let m = a.co_member("srv1", &pbs).unwrap().unwrap();
+        assert_eq!(m.identity_key, rotated2.identity_key);
+        assert!(!m.key_changed && m.signed_card);
+        // Removing the contact keeps the co-member record.
+        a.remove_contact(&pbs).unwrap();
+        assert!(!a.co_member("srv1", &pbs).unwrap().unwrap().is_contact);
     }
 
     #[tokio::test]

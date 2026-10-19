@@ -6,6 +6,7 @@ pub mod net;
 pub mod proto;
 pub mod qr;
 pub mod safety;
+pub mod servers;
 pub mod socks;
 pub mod store;
 pub mod util;

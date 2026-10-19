@@ -102,6 +102,8 @@ pub enum KeyChangeSource {
     KeyClaim,
     /// A scanned QR / contact card passed to `add_contact`.
     ContactCard,
+    /// A server roster entry (co-member card) for this peer.
+    Roster,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

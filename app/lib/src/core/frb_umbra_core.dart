@@ -327,5 +327,6 @@ app.KeyChangeSource _source(rust.KeyChangeSource source) {
     rust.KeyChangeSource.hello => app.KeyChangeSource.hello,
     rust.KeyChangeSource.keyClaim => app.KeyChangeSource.keyClaim,
     rust.KeyChangeSource.contactCard => app.KeyChangeSource.contactCard,
+    rust.KeyChangeSource.roster => app.KeyChangeSource.roster,
   };
 }

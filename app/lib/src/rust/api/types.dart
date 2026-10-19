@@ -302,6 +302,9 @@ enum KeyChangeSource {
 
   /// A scanned QR / contact card passed to `add_contact`.
   contactCard,
+
+  /// A server roster entry (co-member card) for this peer.
+  roster,
 }
 
 class Message {

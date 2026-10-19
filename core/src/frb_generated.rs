@@ -1037,6 +1037,7 @@ impl SseDecode for crate::api::types::KeyChangeSource {
             0 => crate::api::types::KeyChangeSource::Hello,
             1 => crate::api::types::KeyChangeSource::KeyClaim,
             2 => crate::api::types::KeyChangeSource::ContactCard,
+            3 => crate::api::types::KeyChangeSource::Roster,
             _ => unreachable!("Invalid variant for KeyChangeSource: {}", inner),
         };
     }
@@ -1483,6 +1484,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::KeyChangeSource {
             Self::Hello => 0.into_dart(),
             Self::KeyClaim => 1.into_dart(),
             Self::ContactCard => 2.into_dart(),
+            Self::Roster => 3.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -1782,6 +1784,7 @@ impl SseEncode for crate::api::types::KeyChangeSource {
                 crate::api::types::KeyChangeSource::Hello => 0,
                 crate::api::types::KeyChangeSource::KeyClaim => 1,
                 crate::api::types::KeyChangeSource::ContactCard => 2,
+                crate::api::types::KeyChangeSource::Roster => 3,
                 _ => {
                     unimplemented!("");
                 }

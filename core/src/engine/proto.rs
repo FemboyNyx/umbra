@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::api::types::{ContactCard, SignalKind};
+use crate::engine::servers::ServerPayloadKind;
 
 pub const MSG_PROTOCOL: &str = "/umbra/msg/1";
 pub const KEYS_PROTOCOL: &str = "/umbra/keys/1";
@@ -43,6 +44,9 @@ pub enum RejectReason {
     KeyMismatch,
     /// Too many requests; retry later.
     RateLimited,
+    /// Server-scoped payload from a peer that is not a co-member of that
+    /// server, or whose key for it is unresolved or unsigned.
+    NotAMember,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,5 +92,13 @@ pub enum PayloadBody {
         call_id: String,
         kind: SignalKind,
         payload: String,
+    },
+    /// Server-scoped payload (Phase 0 carrier, see docs/core-api.md).
+    /// Accepted only from co-members of `server_id`. `data` is unpadded
+    /// base64 and opaque to Phase 0.
+    Server {
+        server_id: String,
+        kind: ServerPayloadKind,
+        data: String,
     },
 }

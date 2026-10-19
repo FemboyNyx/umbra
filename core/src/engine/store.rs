@@ -54,6 +54,32 @@ CREATE TABLE IF NOT EXISTS outbox (
     last_attempt INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS outbox_peer ON outbox(peer_id, created_at);
+-- v3: servers Phase 0 (docs/servers.md). Which of OUR identities a server
+-- membership uses, and per-server settings that later phases read.
+CREATE TABLE IF NOT EXISTS server_memberships (
+    server_id          TEXT PRIMARY KEY,
+    identity           TEXT NOT NULL,   -- 'default' | 'dedicated'
+    history_visibility TEXT,            -- NULL = not set (policy decides)
+    joined_at          INTEGER NOT NULL
+);
+-- Co-members: peers we share a server with. NOT contacts. One row per
+-- (server, member identity); the member identity is their PeerId, which is
+-- derived from (and so equivalent to) their Ed25519 key.
+CREATE TABLE IF NOT EXISTS co_members (
+    server_id             TEXT NOT NULL,
+    peer_id               TEXT NOT NULL,
+    display_name          TEXT NOT NULL DEFAULT '',
+    identity_key          TEXT NOT NULL,
+    ed25519_key           TEXT NOT NULL,
+    card_sig              TEXT,
+    addrs                 TEXT NOT NULL DEFAULT '[]',
+    added_at              INTEGER NOT NULL,
+    pending_identity_key  TEXT,
+    pending_card_sig      TEXT,
+    rejected_identity_key TEXT,
+    PRIMARY KEY (server_id, peer_id)
+);
+CREATE INDEX IF NOT EXISTS co_members_peer ON co_members(peer_id);
 "#;
 
 pub struct Store {
@@ -105,6 +131,54 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
 }
 
 const MSG_COLS: &str = "id, peer_id, outgoing, body, ts, status, read";
+
+/// One co-member record (`server_id`, `peer_id`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoMemberRow {
+    pub server_id: String,
+    pub peer_id: String,
+    pub display_name: String,
+    pub identity_key: String,
+    pub ed25519_key: String,
+    /// Card v2 signature over (`peer_id`, `identity_key`). Required to add a
+    /// co-member; `None` only after accepting an unsigned key change, which
+    /// blocks server traffic until a signed `Hello` restores it.
+    pub card_sig: Option<String>,
+    pub addrs: Vec<String>,
+    pub added_at: i64,
+    pub pending_identity_key: Option<String>,
+    pub pending_card_sig: Option<String>,
+    pub rejected_identity_key: Option<String>,
+}
+
+const CO_MEMBER_COLS: &str = "server_id, peer_id, display_name, identity_key, ed25519_key, card_sig, addrs, added_at, pending_identity_key, pending_card_sig, rejected_identity_key";
+
+fn row_to_co_member(r: &rusqlite::Row<'_>) -> rusqlite::Result<CoMemberRow> {
+    let addrs: String = r.get(6)?;
+    Ok(CoMemberRow {
+        server_id: r.get(0)?,
+        peer_id: r.get(1)?,
+        display_name: r.get(2)?,
+        identity_key: r.get(3)?,
+        ed25519_key: r.get(4)?,
+        card_sig: r.get(5)?,
+        addrs: serde_json::from_str(&addrs).unwrap_or_default(),
+        added_at: r.get(7)?,
+        pending_identity_key: r.get(8)?,
+        pending_card_sig: r.get(9)?,
+        rejected_identity_key: r.get(10)?,
+    })
+}
+
+/// Local server membership record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipRow {
+    pub server_id: String,
+    /// `"default"` or `"dedicated"`.
+    pub identity: String,
+    pub history_visibility: Option<String>,
+    pub joined_at: i64,
+}
 
 /// Contact row without the derived fields (safety number, online).
 #[derive(Debug, Clone)]
@@ -373,18 +447,144 @@ impl Store {
         Ok(())
     }
 
-    /// Delete contact plus all sessions, messages and outbox entries.
-    pub fn remove_contact(&self, peer_id: &str) -> Result<()> {
+    /// Delete contact plus its messages and outbox entries, and its Olm
+    /// sessions unless `keep_sessions` (the peer is still a co-member).
+    pub fn remove_contact(&self, peer_id: &str, keep_sessions: bool) -> Result<()> {
         let mut c = self.c();
         let tx = c.transaction()?;
         let n = tx.execute("DELETE FROM contacts WHERE peer_id = ?1", [peer_id])?;
-        tx.execute("DELETE FROM olm_sessions WHERE peer_id = ?1", [peer_id])?;
+        if !keep_sessions {
+            tx.execute("DELETE FROM olm_sessions WHERE peer_id = ?1", [peer_id])?;
+        }
         tx.execute("DELETE FROM messages WHERE peer_id = ?1", [peer_id])?;
         tx.execute("DELETE FROM outbox WHERE peer_id = ?1", [peer_id])?;
         tx.commit()?;
         if n == 0 {
             bail!("unknown contact {peer_id}");
         }
+        Ok(())
+    }
+
+    // ---- servers / co-members ----
+
+    pub fn upsert_membership(&self, m: &MembershipRow) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO server_memberships(server_id, identity, history_visibility, joined_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(server_id) DO UPDATE SET history_visibility = excluded.history_visibility",
+            params![m.server_id, m.identity, m.history_visibility, m.joined_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_membership(&self, server_id: &str) -> Result<Option<MembershipRow>> {
+        Ok(self
+            .c()
+            .query_row(
+                "SELECT server_id, identity, history_visibility, joined_at FROM server_memberships WHERE server_id = ?1",
+                [server_id],
+                |r| {
+                    Ok(MembershipRow {
+                        server_id: r.get(0)?,
+                        identity: r.get(1)?,
+                        history_visibility: r.get(2)?,
+                        joined_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Insert or refresh a co-member. The pinned key and key-change state are
+    /// never overwritten here (callers compare keys first).
+    pub fn upsert_co_member(&self, m: &CoMemberRow) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO co_members(server_id, peer_id, display_name, identity_key, ed25519_key, card_sig, addrs, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(server_id, peer_id) DO UPDATE SET display_name = excluded.display_name,
+               addrs = excluded.addrs, card_sig = COALESCE(co_members.card_sig, excluded.card_sig)",
+            params![
+                m.server_id,
+                m.peer_id,
+                m.display_name,
+                m.identity_key,
+                m.ed25519_key,
+                m.card_sig,
+                serde_json::to_string(&m.addrs)?,
+                m.added_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// All co-member records of one peer (one per shared server).
+    pub fn co_member_rows(&self, peer_id: &str) -> Result<Vec<CoMemberRow>> {
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT {CO_MEMBER_COLS} FROM co_members WHERE peer_id = ?1 ORDER BY server_id"
+        ))?;
+        let rows = st
+            .query_map([peer_id], row_to_co_member)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn list_co_members(&self, server_id: Option<&str>) -> Result<Vec<CoMemberRow>> {
+        let c = self.c();
+        let mut st = c.prepare(&format!(
+            "SELECT {CO_MEMBER_COLS} FROM co_members WHERE ?1 IS NULL OR server_id = ?1
+             ORDER BY server_id, display_name, peer_id"
+        ))?;
+        let rows = st
+            .query_map([server_id], row_to_co_member)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Returns false if there was no such record.
+    pub fn remove_co_member(&self, server_id: &str, peer_id: &str) -> Result<bool> {
+        let n = self.c().execute(
+            "DELETE FROM co_members WHERE server_id = ?1 AND peer_id = ?2",
+            params![server_id, peer_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn co_member_seen(&self, peer_id: &str, addrs: &[String], sig: Option<&str>) -> Result<()> {
+        self.c().execute(
+            "UPDATE co_members SET addrs = ?2, card_sig = COALESCE(card_sig, ?3) WHERE peer_id = ?1",
+            params![peer_id, serde_json::to_string(addrs)?, sig],
+        )?;
+        Ok(())
+    }
+
+    /// Flag a key change on every record of `peer_id`.
+    pub fn co_member_set_pending(&self, peer_id: &str, key: &str, sig: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE co_members SET pending_identity_key = ?2, pending_card_sig = ?3 WHERE peer_id = ?1",
+            params![peer_id, key, sig],
+        )?;
+        Ok(())
+    }
+
+    /// Pin `key` (with `sig`, if any) on every record of `peer_id` and clear
+    /// key-change state.
+    pub fn co_member_set_key(&self, peer_id: &str, key: &str, sig: Option<&str>) -> Result<()> {
+        self.c().execute(
+            "UPDATE co_members SET identity_key = ?2, card_sig = ?3, pending_identity_key = NULL,
+               pending_card_sig = NULL, rejected_identity_key = NULL WHERE peer_id = ?1",
+            params![peer_id, key, sig],
+        )?;
+        Ok(())
+    }
+
+    pub fn co_member_reject(&self, peer_id: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE co_members SET rejected_identity_key = pending_identity_key,
+               pending_identity_key = NULL, pending_card_sig = NULL
+             WHERE peer_id = ?1 AND pending_identity_key IS NOT NULL",
+            [peer_id],
+        )?;
         Ok(())
     }
 
@@ -904,7 +1104,7 @@ mod tests {
         s.prune_sessions("p1", 1).unwrap();
         assert_eq!(s.sessions_for("p1").unwrap().len(), 1);
 
-        s.remove_contact("p1").unwrap();
+        s.remove_contact("p1", false).unwrap();
         assert!(s.get_contact("p1").unwrap().is_none());
         assert!(s.list_messages("p1", None, 10).unwrap().is_empty());
         assert!(s.sessions_for("p1").unwrap().is_empty());

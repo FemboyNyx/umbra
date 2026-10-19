@@ -153,6 +153,84 @@ Both return an error if nothing is pending. The DB schema moved to v2
 (columns `pending_identity_key`, `rejected_identity_key`, `key_changed_at`);
 v1 databases are migrated on `init`.
 
+## Servers, Phase 0: memberships and co-members (engine API)
+
+Phase 0 of [servers.md](servers.md). These are **engine-level** (`Core`)
+methods for Phase 1 server code in core. They are **not in the FFI** yet
+(no Dart bindings), so the app can't use them directly.
+
+```rust
+// Local membership: which of OUR identities this server uses (explicit).
+fn add_server_membership(&self, server_id: &str, identity: ServerIdentity,
+                         history: Option<HistoryVisibility>) -> Result<ServerMembership>;
+fn server_membership(&self, server_id: &str) -> Result<Option<ServerMembership>>;
+fn set_server_history(&self, server_id: &str, history: Option<HistoryVisibility>) -> Result<()>;
+// Co-members (from roster entries; Phase 1 calls these).
+fn add_co_member(self: &Arc<Self>, server_id: &str, card: ContactCard) -> Result<CoMember>;
+fn remove_co_member(&self, server_id: &str, peer_id: &str) -> Result<()>;
+fn co_member(&self, server_id: &str, peer_id: &str) -> Result<Option<CoMember>>;
+fn list_co_members(&self, server_id: Option<&str>) -> Result<Vec<CoMember>>;
+fn accept_key_change_any(self: &Arc<Self>, peer_id: &str) -> Result<()>; // contacts or co-members
+fn subscribe_server(&self) -> UnboundedReceiver<ServerInbound>;           // engine-internal
+
+enum ServerIdentity { Default, Dedicated }   // Dedicated: refused in Phase 0
+enum HistoryVisibility { Joined, Shared }    // stored only; None = unset
+struct ServerMembership { server_id, identity, history_visibility: Option<_>, joined_at_ms }
+struct CoMember { server_id, peer_id, display_name, identity_key, ed25519_key, addrs,
+                  added_at_ms, signed_card, key_changed, pending_identity_key, is_contact }
+struct ServerInbound { peer_id, server_id, kind: ServerPayloadKind, data: Vec<u8>, id, ts }
+```
+
+**Identity per server.** Every membership records which of our identities
+it uses, as an explicit parameter with no default: `Default` (the user's
+normal PeerId and keys) or `Dedicated` (a separate identity for that server).
+`Dedicated` is accepted by the API but refused in Phase 0, because it needs
+its own device key, Olm account and network identity. Rules for when it
+lands: a dedicated identity is never linked to the default one in cards,
+`Hello`s, logs or outbox rows, and is never used toward contacts. A
+membership's identity can't change. Other members may also use per-server
+identities. To us that is simply a different PeerId, so co-member records are
+keyed by **(server_id, member PeerId)**. The PeerId is derived from the
+member's Ed25519 identity key, so this is the same as keying by that key.
+
+**History visibility** is a per-server setting (`HistoryVisibility`,
+`None` = not set). Phase 0 only stores it, and nothing in core hard-wires
+"from join".
+
+**Co-member trust class.** A co-member is a peer from a server roster with
+a **signed (v2) card**. It is stored separately from contacts (table
+`co_members`), never shows up in `list_contacts`, and is **never promoted to a
+contact automatically**. Only `add_contact` (a user action) makes a contact.
+
+| From a co-member who isn't a contact | Result |
+|---|---|
+| `Hello` (must carry a valid v2 card) | `Ok`, no `ContactRequest`; unsigned → `Malformed` |
+| `ClaimOneTimeKey` | Served, with the **same per-peer limits** as contacts (claim bucket, outstanding-OTK caps) |
+| Olm `Server { server_id, .. }` | Delivered to `subscribe_server` only if they are a co-member of **that** `server_id`; else `Rejected(NotAMember)` |
+| Olm `Text` | `Rejected(NotAContact)`, nothing stored. It raises `ContactRequest { card }` (rate-limited like any contact request), matching servers.md's "handled like a contact request" (open question 6) |
+| Olm `Signal` (calls) | `Rejected(NotAContact)` |
+
+Strangers are unchanged: contact requests, and no keys.
+
+**Pins and KeyChanged.** A peer has a single pin across its contact record and
+all of its co-member records (the contact's is authoritative). The pin is
+checked on `add_co_member`, `add_contact`, `Hello` and key claims:
+
+* A different key raises `KeyChanged` once and marks **every** record of the
+  peer as pending. Roster mismatches use the new `KeyChangeSource::Roster`.
+* While a change is pending, or if any copy disagrees or the record is
+  unsigned, **all server traffic to and from the peer stops**
+  (`NotAMember`). DMs with a contact behave as before.
+* Co-member records only accept **signed** new keys. An unsigned change of a
+  co-member-only peer (a key claim answer) is refused without raising an alert.
+* `accept_key_change_any` / `reject_key_change` resolve all records of the
+  peer together. FFI `accept_key_change` is still contacts-only, so a
+  co-member-only key change can't be accepted from the app yet (Phase 1
+  members API). `reject_key_change` works for both.
+* `remove_contact` keeps the Olm sessions while the peer is still a co-member.
+  `remove_co_member` drops them once the peer is in no shared server and
+  isn't a contact.
+
 ## Messaging
 
 ```rust
@@ -198,7 +276,7 @@ struct ContactCard { peer_id, identity_key, ed25519_key, addrs: Vec<String>, dis
 struct Contact { peer_id, display_name, identity_key, ed25519_key, addrs, verified: bool,
                  safety_number, added_at_ms: i64, online: bool,
                  key_changed: bool, pending_identity_key: Option<String>, signed_card: bool }
-enum KeyChangeSource { Hello, KeyClaim, ContactCard }
+enum KeyChangeSource { Hello, KeyClaim, ContactCard, Roster }
 struct Message { id, peer_id, outgoing: bool, body, timestamp_ms: i64, status: DeliveryStatus, read: bool }
 struct ConversationSummary { peer_id, display_name, last_message: Option<Message>, unread_count: u32, updated_at_ms: i64 }
 struct NetworkInfo { running: bool, listen_addrs: Vec<String>, connected_peers: u32, relay_reservations: u32 }
@@ -254,10 +332,21 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
 * **`/umbra/msg/1`** (CBOR): `Hello { card }` (once per connection) or
   `Olm { t, c }`. The response is the ack: `Ok`, `Delivered`, or
   `Rejected(NotAContact | DecryptFailed | Malformed | Internal | KeyMismatch |
-  RateLimited)`.
-  Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal}`; `to` must be
+  RateLimited | NotAMember)`.
+  Olm plaintext is JSON `{v, to, id, ts, body: Text | Signal | Server}`; `to` must be
   the receiver's PeerId. Olm v1 (libolm-compatible) sessions, up to 4 per
   peer, pre-key messages matched by session id.
+* **Server payload carrier (Phase 0)**: `PayloadBody::Server { server_id,
+  kind: ServerPayloadKind, data }`, with `kind` one of `ServerKey |
+  ServerKeyForward | ServerKeyRequest | ServerManifest | ServerOp` and `data`
+  opaque unpadded base64, at most 64 KiB decoded. **This deviates from
+  servers.md**, which lists those as separate top-level `PayloadBody`
+  variants. One carrier keeps `server_id` outside the opaque bytes, so the
+  co-member check ("is the sender in *this* server?") is one uniform check
+  even for `ServerManifest { bytes }` / `ServerOp { bytes }`. Phase 1 defines
+  each kind's `data`. `ServerInvite` is a DM and is not a server payload.
+  Older cores reply `Rejected(Malformed)` (accepted before 1.0, as in
+  servers.md).
 * **Contact flow**: Alice scans Bob → Alice's Hello reaches Bob → Bob gets
   `ContactRequest` (at most once per identity per 10 min until accepted,
   subject to the limits below; still dedupe by `peer_id` in the UI). Messages Alice sends meanwhile wait in her outbox and flush
