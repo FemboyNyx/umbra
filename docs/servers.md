@@ -315,6 +315,196 @@ being experimental. Then neither side learns the other's IP. Until then,
 Tor-only members reach a host through `relay_addrs` circuits, the same way
 they reach contacts.
 
+### Operator duties (legal-driven, phase 1)
+
+These come from Syd's legal review of host exposure,
+[legal.md §4 "Community servers and blind hosts"](legal.md#4-community-servers-and-blind-hosts),
+mostly the settings list in §4.5. They're all part of `umbra-host` in phase 1. The
+host stays blind throughout: it only ever acts on identifiers (`ServerId`,
+`EnvHash`, `BlobId`, `PeerId`), never on content, because it can't read any.
+
+**Operator contact (required).** The host config has a published contact
+address (an email or a URL), and `umbra-host` won't start without one. This
+is the single point of contact §4.1 lists (DSA Arts. 11 and 12) and the
+notice address §4.5 asks for. An optional `dmca_agent` field holds the
+designated agent's details as filed with the U.S. Copyright Office, if the
+operator has registered one (§4.2; that means publishing a legal name and
+street address, which is the operator's choice). The host signs a
+`HostInfo { peer_id, operator_name?, contact, dmca_agent?, aup_sha256,
+aup_version, logging: { ip_logs, retention_hours }, ts, sig }` and serves it
+to members on `/umbra/srv/1`. The app shows it in the join preview and the
+host info sheet, next to the blind or member badge, and to the owner when
+they add the host. Where else the operator publishes the address
+(a website, a `security.txt`) is up to them.
+
+**Onboarding warnings and acceptable-use policy.** `umbra-host init` won't
+write a config until the operator has read and acknowledged, interactively
+(or with `--accept-aup <sha256>` for containers):
+
+- The §4.5 onboarding text, word for word: you're hosting encrypted data you
+  can't read for other people, you can still get legal process about it, you
+  hold PeerIds, IPs (unless members use Tor), timestamps and sizes for up to
+  the retention period, if you're told about illegal material you may have
+  to act and report it (don't open or decrypt it), and you must be **18 or
+  older** (or the age of majority where you live).
+- The §4.5 jurisdiction caveat: the notes only cover US federal and EU-level
+  law, and running a host is your own legal responsibility.
+- You may get legal notices (takedowns, preservation requests) and you're the
+  contact for them.
+- Members see your host's IP unless it's an onion service.
+- You can refuse or remove things by identifier, and under a hold you'll
+  keep encrypted data past its expiry.
+- The acceptable-use policy (AUP), using the §4.5 text: no child sexual abuse
+  material, copyright infringement, threats or harassment, malware, or
+  anything illegal; the host may remove specific items it's notified about
+  and refuse service to any account; and the host contact.
+- In **member host** mode (`umbra-host --member`), a stronger warning that
+  the host can read everything it holds keys for and can get actual
+  knowledge directly (§4, §4.5).
+
+The acknowledgement (`aup.version`, `aup.sha256`, timestamp) goes in the
+config. A new AUP version needs a new acknowledgement before the host starts.
+Members see the AUP in the join preview (§4.5) and can open it from the host
+info sheet. The owner has to accept it when adding the host.
+
+**IP and connection logging: off by default (§4.5, §4.4).** `umbra-host`
+keeps no IP or connection logs unless the operator turns them on with
+`logging.ip_logs = true`. That's an explicit opt-in: `umbra-host` shows a
+warning that the logs tie members' PeerIds to IPs and times, that they can
+be obtained by subpoena (18 U.S.C. § 2703(c)(2)) or a DMCA subpoena
+(§ 512(h)), that they're personal data under the GDPR, and that they undo
+much of what members gain from hosting over Tor. The operator has to
+confirm. Logs then rotate after **24 hours by default, 7 days at most
+(proposed)**. Even with logging on, the host doesn't keep `Push`/`Fetch`
+patterns or relay sender/recipient pairs after delivery (§4.4). Whether
+logging is on, and for how long, is in the signed `HostInfo`, so members see
+it in the join preview and host info sheet ("This host logs IP addresses for
+24 hours"). It's in the threat model below and in
+[threat-model.md](threat-model.md#metadata).
+
+**Denylists.** The operator controls three lists in the config, or through
+`umbra-host deny add|remove` (§4.5's blob and peer denylists):
+
+| List | Matches | Effect |
+| --- | --- | --- |
+| `deny.blobs` | `BlobId` (a file chunk) or `EnvHash` (a message envelope), the SHA-256 of the ciphertext | Refuses to store or serve that item. Existing copies are deleted unless a hold covers them |
+| `deny.peers` | `PeerId` | Refuses pushes, fetches and relays from that member, even if the owner's `HostGrant` lists it. This is how the repeat-infringer policy in §4.2 works |
+| `deny.servers` | `ServerId` | Stops hosting the whole server |
+
+Every refusal comes back as a **signed refusal receipt**:
+`Refused { id, scope: Blob | Envelope | Peer | Server, reason: Denylist |
+Takedown { notice_id }, statement?, ts, sig }`, signed by the host's key.
+`statement` is the short statement of reasons DSA Art. 17 asks for (§4.1,
+§4.5 step 3). For takedowns the host also queues it as a signed
+`OperatorNotice` through its relay queue to the server owner and to the
+PeerId that pushed the item. That includes
+items in a `Fetch` range, which come back in a `refused` list next to the
+envelopes. In [Host sanity checks](#host-sanity-checks) a gap covered by a
+valid refusal from that host shows as **"refused by host operator"**, with
+its own indicator (a grey "operator" mark, not the amber warning dot) and the
+notice ID if there is one. It's never a warning, and it never notifies more
+than once per host. Clients still try other hosts and members for the item,
+because the refusal only covers that host. **An unsigned or unexplained gap
+still raises a warning, as before.** A refusal for an item the host earlier
+signed a `Stored` receipt for is fine (a takedown can come after storage),
+and it shows as "removed by host operator after storing it".
+
+The limit: denylists match exact ciphertext. Every file has its own random
+key, so the same picture sent twice has two unrelated `BlobId`s, and a
+known-content hash list (the kind used to scan for abuse material) can't
+match anything on a blind host. That's a direct consequence of the
+encryption, and the AUP and onboarding say so.
+
+**Preservation holds.** On a lawful notice, the operator runs
+`umbra-host hold add <notice.json>`. The host then keeps the named
+ciphertext (`EnvHash`es, `BlobId`s, or everything for a `ServerId` or
+`PeerId`) **past the 30-day retention limit and past disappearing-message
+expiry**, until the hold is lifted or its `until` passes. The default
+`until` is **90 days**, matching an 18 U.S.C. § 2703(f) request, and it can
+be renewed for another 90 (§4.4). A CSAM report keeps the material for the
+period §4.3 and §4.5 step 4 give (1 year after a CyberTipline report). A
+hold snapshots only the named records and suspends deletion for them only.
+
+- Held items past their signed expiry are kept but **not served** to members
+  any more, so honest clients behave the same as without the hold.
+- A hold keeps data rather than losing it, so it never triggers deletion or
+  withholding alerts. Clients can't detect a hold at all, the same as any
+  other retention. Whether members are told about a specific hold depends on
+  the notice and the law (§4.4: tell the affected member when you're
+  allowed to).
+- A hold can only preserve what the host already stores: ciphertext and the
+  metadata in its ACL and stores. With logging off (the default) there are no
+  IP logs to preserve. Preservation isn't disclosure: nothing is handed over
+  without legal process (§4.4).
+- **A hold can't reach plaintext.** A blind host has no keys and no
+  plaintext to hold. Members' clients still delete their own copies and keys
+  at expiry, so held ciphertext can only be decrypted by someone who still
+  has the keys, such as a member who didn't delete or a member host. A member
+  host is a member, and holds on member hosts are outside this design.
+
+**The privacy consequence, said plainly:** a disappearing message can
+survive on a host as ciphertext after it "disappeared", for as long as a
+hold lasts. The host can't read it. The warning shown when turning on a
+timer, and the host info sheet, say this.
+
+**Takedown notices.** Notices name items by identifier, because that's all
+the host can act on. The format, accepted by `umbra-host takedown apply`:
+
+```json
+{
+  "v": 1,
+  "notice_id": "2026-10-19-0001",
+  "received": "2026-10-19T19:00:00Z",
+  "from": { "name": "…", "contact": "…" },
+  "basis": "copyright | court-order | law-enforcement | aup | other",
+  "reference": "case or claim number, optional",
+  "action": "refuse | preserve | refuse-and-preserve",
+  "server_id": "base64url ServerId",
+  "items": [
+    { "type": "blob", "id": "BlobId" },
+    { "type": "envelope", "id": "EnvHash" },
+    { "type": "peer", "id": "PeerId" }
+  ],
+  "until": "optional end of a hold"
+}
+```
+
+People outside the server can't know these identifiers. They come from a
+member: the app's message info has **"Report to host operator"**, which
+builds a notice draft with the `ServerId`, the message's `EnvHash` and its
+file's `BlobId`s, plus the operator contact from `HostInfo`. Sending it is
+up to the member.
+
+This matches the notice template in §4.5, and a notice naming the
+`ServerId` plus `BlobId`s is what §4.2 calls enough to locate the material
+(17 U.S.C. § 512(c)(3)(A)(iii), DSA Art. 16(2)(b)). For copyright claims the
+JSON also carries the § 512(c)(3) statements and signature.
+
+Operator workflow (the §4.5 takedown checklist, mapped to `umbra-host`):
+
+1. Log the notice (`umbra-host notices` keeps date, sender and IDs locally,
+   not sent to members).
+2. `umbra-host takedown check` maps it to the items this host really stores.
+   If nothing maps, reply asking for the `ServerId` and `BlobId`s.
+3. Decide. The operator can't see the content, so it can't confirm what the
+   item is. It acts on the notice and the sender's claim, or declines.
+4. `apply`: disables access to those exact items and adds them to the
+   denylist with the `notice_id`, so refusal receipts carry it, and sends the
+   statement of reasons to the owner and uploader.
+5. **CSAM:** `apply --preserve` holds the items, nobody views them, and the
+   operator reports to NCMEC (US) or the police (EU) as §4.3 describes.
+6. **Copyright:** `umbra-host takedown restore <notice_id>` handles a valid
+   counter-notice (§ 512(g)), and repeated valid notices against one PeerId
+   lead to `deny.peers`.
+
+| The operator can | The operator can't |
+| --- | --- |
+| Refuse or remove specific envelopes and chunks by hash | See, check or describe the content |
+| Stop serving a member (`PeerId`) or a whole server (`ServerId`) | Find "every copy" of a file, since each upload has a different `BlobId` |
+| Preserve named ciphertext under a hold | Hand over plaintext or keys, since it has none |
+| Say which PeerIds are in a server's ACL, and their IPs if it logged them (it doesn't by default) | Remove copies from members' devices or from other hosts |
+| | Say who a PeerId belongs to |
+
 ## Host sanity checks
 
 Nyx asked that clients notice when a host deletes, drops or withholds stored
@@ -397,6 +587,7 @@ these hold:
 | Deleted | A signed `DeleteMessage` op covers it |
 | Before your window | It's before your join in a `from_join` channel, or before the history window |
 | No access | It's in a channel your role can't read |
+| Refused by host operator | The host returned a signed refusal receipt for that item ([Operator duties](#operator-duties-legal-driven-phase-1)). Shown with its own "operator" indicator, not as expected silence and not as a warning |
 
 Everything else is **unexpected**. In particular, a host may only drop an
 item **after** its signed expiry (with **10 minutes of clock-skew slack,
@@ -413,6 +604,7 @@ receipt says exists. And if the host can't be reached at all, that's shown as
 | Level | When | What the user sees |
 | --- | --- | --- |
 | Info | Expected absence | Inline muted marker: "3 messages expired", "2 messages expired before delivery", "Older messages are past this server's 30-day retention". No notification |
+| Operator refusal | A gap covered by a valid signed refusal receipt | A grey "refused by host operator" mark inline and on the host info sheet, with the notice ID if any. At most one notification per host |
 | Warning | An unexpected absence that survives a re-fetch, a fetch by hash from at least one other source, and a **15-minute grace period (proposed)** | A persistent **host health** indicator on the server (an amber dot on the host badge and in server settings) with "Host H didn't return 2 messages from Ana". **At most one notification per host per day (proposed)**, and repeats fold into the same open incident |
 | Critical | A host contradicts its own signed receipt, or cross-checks prove a split view | A blocking banner like forks and rollbacks, with the evidence (receipts and heads) that can be sent to admins over Olm |
 | Sender fork | Two signed envelopes for one `seq` | Blocking banner against the sender |
@@ -571,7 +763,8 @@ Shown to the user when they turn a timer on, in plain words:
 
 > Disappearing messages are deleted from your devices and from honest hosts.
 > Anyone who receives them can still screenshot, copy or photograph them, or
-> use a modified app that doesn't delete. A host can keep its encrypted copy.
+> use a modified app that doesn't delete. A host can keep its encrypted copy,
+> and must keep it if it gets a legal preservation hold. It can't read it.
 
 Deletion is best effort. It protects against someone who gets a device
 later, and keeps old messages from piling up. It doesn't protect against a
@@ -903,9 +1096,10 @@ cross-checks):
 
 | Request | Response |
 | --- | --- |
-| `Push { env: Envelope }` where `Envelope { server_id, channel_id, session_id, exp_bucket?, megolm }` | `Stored { cursor, receipt }` or `Rejected(reason)` |
-| `Fetch { server_id, channel_id, after, limit }` | `Envelopes { items, next }` |
-| `GetEnv { server_id, hashes: [EnvHash] }` | `Envelopes { items }`. Hosts and members both answer, which is how gaps are filled |
+| `Push { env: Envelope }` where `Envelope { server_id, channel_id, session_id, exp_bucket?, megolm }` | `Stored { cursor, receipt }`, `Refused { receipt }` or `Rejected(reason)` |
+| `Fetch { server_id, channel_id, after, limit }` | `Envelopes { items, refused: [Refused], next }` |
+| `GetEnv { server_id, hashes: [EnvHash] }` | `Envelopes { items, refused }`. Hosts and members both answer, which is how gaps are filled |
+| `Info` | `HostInfo` (operator contact, AUP hash and version, signed) |
 | `Relay { to: PeerId, olm: { t, c }, exp_bucket? }` | `Queued { receipt }`. Store-and-forward of Olm payloads for offline members. The host sees who sent what to whom |
 | `FetchRelayed` | `Relayed { items }` |
 | `Grant { HostGrant }` | `Ok` |
@@ -915,7 +1109,8 @@ session binding, and the host knows it anyway from the connection.
 
 **`/umbra/blob/1`**: `Have { ids }` returns which ones it has,
 `Get { id, offset, len }` returns bytes, and `Put { id, bytes, exp_bucket? }`
-returns `Stored` or `Rejected(Quota | TooLarge | HashMismatch)`.
+returns `Stored`, `Refused { receipt }` or `Rejected(Quota | TooLarge | HashMismatch)`. `Get`
+on a denylisted chunk returns `Refused { receipt }`.
 
 There's no `/umbra/index/1`. Umbra doesn't do discovery (see
 [Discovery](#discovery)).
@@ -985,7 +1180,50 @@ fn list_message_requests() -> Result<Vec<MessageRequest>>;
 async fn set_hosts(server_id: String, hosts: Vec<String>) -> Result<()>;
 fn host_health(server_id: String) -> Result<Vec<HostHealth>>; // open incidents, history
 async fn export_integrity_evidence(server_id: String, incident: String) -> Result<Vec<u8>>;
+fn host_info(server_id: String) -> Result<Vec<HostInfo>>; // operator contact, AUP, refusal counts
+fn draft_takedown_report(server_id: String, id: MessageId) -> Result<TakedownDraft>; // ServerId, EnvHash, BlobIds
 // The blind host itself is the standalone `umbra-host` binary, not an app API.
+```
+
+**`umbra-host` config and CLI sketch** (TOML, phase 1):
+
+```toml
+[host]
+listen = ["/ip4/0.0.0.0/tcp/4101"]
+data_dir = "/var/lib/umbra-host"
+quota_per_server = "5 GiB"
+retention_days = 30
+
+[logging]                  # legal.md §4.4, §4.5
+ip_logs = false            # off by default; turning it on shows a warning and asks to confirm
+retention_hours = 24       # only if ip_logs = true; max 168
+
+[operator]
+name = "Example Hosting"   # optional
+contact = "abuse@example.org"   # required, published in HostInfo
+# dmca_agent = "…"         # optional, as filed with the U.S. Copyright Office
+
+[aup]
+version = 1
+sha256 = "…"               # written by `umbra-host init` after acknowledgement
+accepted_at = "2026-10-19T19:00:00Z"
+
+[deny]
+blobs = []                 # BlobId or EnvHash
+peers = []                 # PeerId
+servers = []               # ServerId
+
+[tor]
+onion = false              # once tor-listen is stable
+```
+
+```
+umbra-host init                       # warnings + AUP, writes the config
+umbra-host run
+umbra-host deny add|remove|list <blob|envelope|peer|server> <id>
+umbra-host takedown check|apply|restore <notice.json | notice_id>
+umbra-host hold add|lift|list <notice.json | notice_id>
+umbra-host notices list               # local notice log
 ```
 
 New `CoreEvent` variants: `ChannelMessage`, `ChannelMessageEdited`,
@@ -1004,7 +1242,8 @@ first known index, forwarded-by, confirmed, pickle), `channel_messages` (with
 `seq`, `prev`, `exp`), `heads`, `host_receipts`, `integrity_incidents`,
 `pending_megolm`, `files`, `blobs`, `packs`, `message_requests`. The
 `umbra-host` program has `host_envelopes` (indexed by `EnvHash` and
-`exp_bucket`) and `host_relay`. Megolm pickles are encrypted with
+`exp_bucket`), `host_relay`, `host_denylist`, `host_holds` and
+`host_notices`. Megolm pickles are encrypted with
 `HKDF(db_key, "megolm-pickle-v1")`, kept separate from the Olm pickle key.
 `mock: true` should fake a server with two channels and a few members,
 including a name collision, an expired message and one open integrity
@@ -1027,6 +1266,10 @@ incident.
   the composer of `shared` channels.
 - **Invites:** the invite button only appears for roles with the permission.
 - **Host badge:** member hosts show "Host, can read everything".
+- **Host info sheet:** operator contact, AUP, blind or member host, refusal
+  count, whether IP logging is on and for how long, and a standing note that
+  the host may preserve ciphertext under a legal hold. The join preview shows
+  the contact, the AUP and the logging state too. "Report to host operator" in message info.
 - **Host health:** an amber dot on the host badge while an incident is open,
   a health page in server settings, at most one notification per host per
   day, and blocking banners only for critical incidents and forks.
@@ -1058,9 +1301,13 @@ history.
 | --- | --- | --- |
 | Host, relay or network reads content | Megolm inside Olm-shared keys. Blind hosts never get session keys | A member host reads everything, by definition |
 | Host learns metadata | Random `ChannelId`s, no sender field in envelopes, padding | The host sees member PeerIds, IPs, timing, sizes, coarse expiry and who posts. Tor hides IPs only |
+| Host logs IPs and hands them over (subpoena, DMCA subpoena) | `umbra-host` logs nothing by default. Logging is an explicit opt-in with a warning, rotates in 24 hours by default (7 days at most), and is shown to members in the signed `HostInfo` | A host that turns logging on, or a modified host that logs without saying so. Tor and onion hosts are the real fix |
 | Host drops, withholds or splits history | Hash chains, signed heads, host receipts, self-audit and cross-checks raise alerts | Detection only, not availability. A host that's every member's only path can hide what others were shown |
 | Host purges early and calls it expiry | The expiry is in the signed plaintext | None. It's alerted like any drop |
 | Host keeps data after expiry or deletion | None possible | Undetectable. Only an honest host purges |
+| Legal preservation hold keeps expired ciphertext | Holds only cover ciphertext the host already has, held items aren't served past expiry, members' clients still delete copies and keys, warning in the timer UI | An expired message can survive on the host as ciphertext for as long as the hold lasts. Anyone who still has the keys could decrypt it. Holds are invisible to clients |
+| Host operator refuses or removes items (denylist, takedown) | Signed refusal receipts, shown as "refused by host operator", not as silent withholding. Other hosts and members can still serve the item | A host can censor openly. Owners see the refusal counts and can replace the host. Bogus notices are the operator's call |
+| Takedown targeting by content | Not possible on a blind host: denylists match exact ciphertext only | Known-content hash lists can't match. Reports depend on a member supplying identifiers |
 | Member impersonates another member | Session binding from Olm, Megolm signatures, v2 cards | Display-name impersonation, handled by badges and lookalike warnings, not by the suffix |
 | Forged history forwarded to a new member | Forwards marked "forwarded by X" and checked against the sender's signed heads | Unconfirmed until a head from the sender arrives |
 | Sender shows different content to different members | Hash chains and cross-checked heads now reveal it as a sender fork | Detected after the fact, not prevented |
@@ -1102,15 +1349,18 @@ history.
 | S7 | File chunks are checked against their `BlobId` before decrypting, and fail closed |
 | S8 | An invite, `JoinHello` or `Admit` is only accepted if its signer's role has the `invite` permission in the manifest it names |
 | S9 | Exported session keys are only forwarded from sessions created under a `shared` policy, to current roster members, and never for expired messages |
-| S10 | A missing item is shown as expected only if a signed expiry, retention window, deletion or join window explains it. Anything else is an integrity alert |
+| S10 | A missing item is shown as expected only if a signed expiry, retention window, deletion or join window explains it, or as an operator refusal if a signed refusal receipt covers it. Anything else is an integrity alert |
 | S11 | Expired content is removed from the message store, attachments, search index and outbox, and its keys are dropped once nothing alive needs them |
+| S12 | A host refusal is shown as "refused by host operator" only with a valid signed refusal receipt from that host. Anything unsigned stays an integrity warning |
+| S13 | A blind host never serves an item past its signed expiry, even while a hold keeps it |
+| S14 | `umbra-host` keeps no IP or connection logs unless `logging.ip_logs` is on, and `HostInfo` always says whether it is |
 
 ## Phasing
 
 | Phase | Scope | Needs |
 | --- | --- | --- |
 | 0 | Card v2 (`ik` signed by `ed`), co-member trust class with message requests, outbox generalisation, `Payload` v2 (`seq`, `prev`, `skipped`, `exp`), padding and the replay record for DMs | Elite |
-| 1 | Servers, text channels, authorized-only invites, roles, kick and ban, required recovery keys, rotation, history sharing (on by default, configurable), the standalone `umbra-host` blind host, files and GIFs as files, per-server profiles. **Host sanity checks:** hash chains, heads, host receipts, self-audit, cross-checks, alerts and the host health page for channels, DMs and the outbox. **Disappearing messages** for DMs and channels, with role policies | Elite (core and `umbra-host`), Copilot (UI), Sally (packaging `umbra-host`), Val (onion hosts once `tor-listen` is stable) |
+| 1 | Servers, text channels, authorized-only invites, roles, kick and ban, required recovery keys, rotation, history sharing (on by default, configurable), the standalone `umbra-host` blind host **with operator duties from legal.md §4 (published contact, onboarding warnings and AUP, IP logging off by default, blob, peer and server denylists with signed refusal receipts, preservation holds, takedown notices)**, files and GIFs as files, per-server profiles. **Host sanity checks:** hash chains, heads, host receipts, self-audit, cross-checks, alerts and the host health page for channels, DMs and the outbox. **Disappearing messages** for DMs and channels, with role policies | Elite (core and `umbra-host`), Copilot (UI), Sally (packaging `umbra-host`), Val (onion hosts once `tor-listen` is stable) |
 | 2 | Link previews, server sticker and GIF packs, separate identities per server, integrity evidence export | Elite, Copilot |
 | 3 | Voice channels | Gem |
 | Not planned | Public servers, an Umbra-run directory or bootstrap, GIF providers. User-added directories are a proposed extension pending Nyx | |
@@ -1158,8 +1408,11 @@ inside Olm signals. For groups there are two options:
 9. ~~**Owner recovery:** required or optional?~~ **Decided:** required at
    server creation.
 10. **Legal:** host operators store ciphertext they can't read, for people
-    they may not know, and now purge on expiry. [legal.md](legal.md) doesn't
-    cover that yet. **Open, pending Syd's review.**
+    they may not know, and now purge on expiry. The operator duties that Syd's
+    review asked for are in [Operator duties](#operator-duties-legal-driven-phase-1),
+    with the analysis in [legal.md §4](legal.md#4-community-servers-and-blind-hosts).
+    **Open:** the items Syd couldn't verify in §4.6, and whether members can
+    be told about a specific hold.
 11. ~~**Disappearing timer start.**~~ **Decided (Chi):** Signal-style. The
     timer starts at send on the sender's device and on hosts, and at read on
     each recipient's device, with a hard cap of `sent + timer + 7 days` for

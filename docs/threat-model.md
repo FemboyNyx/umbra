@@ -62,6 +62,7 @@ with messages after they're decrypted.
 | mDNS broadcasts on the LAN | Off unless `enable_mdns`, and always off with Tor | **(app)** should keep it off by default and explain what it does |
 | A peer learns your IP during a call | None in core | **(calls)/(app)** have to warn before a call or force TURN, especially in Tor mode |
 | Size and timing analysis | None. No padding | Messages leak their length. Padding buckets and timing toggles are proposed in [message-protection.md](message-protection.md#padding) |
+| A community-server host logs IPs (servers, not built yet) | `umbra-host` keeps no IP or connection logs by default. Logging is an explicit operator opt-in with a warning and short rotation, and members see it in the host info ([servers.md](servers.md#operator-duties-legal-driven-phase-1), [legal.md §4.4](legal.md#44-data-retention-and-law-enforcement-requests)) | A host that opts in, or a modified host. Tor and onion hosts hide IPs either way |
 | Strangers probe whether you're online | A `Hello` from a non-contact gets `NotAContact` | Even a refusal confirms the peer is online, and every probe makes a `ContactRequest` event |
 
 ### Availability and abuse
@@ -72,7 +73,7 @@ with messages after they're decrypted.
 | Eclipse or Sybil attacks on the DHT | Contacts' addresses from cards and `Hello` don't depend on the DHT | A determined attacker can hide peers that have moved |
 | A relay operator drops traffic | Several `relay_addrs` can be used | Tor-only users depend on relays to be reachable at all |
 | Undelivered messages | Outbox with ordered retries | Messages expire after 7 days. **(app)** has to show expired messages as failed. The receiver isn't told today; [servers.md](servers.md#dms-and-the-outbox) proposes `Payload` v2 with `seq`, `prev` and `skipped` so gaps are visible |
-| A host drops or withholds stored data (servers, not built yet) | Designed in [servers.md](servers.md#host-sanity-checks): hash chains, signed heads, host receipts and cross-checks raise alerts | Detection only. A host can still deny service, and can keep data past expiry without anyone knowing |
+| A host drops or withholds stored data (servers, not built yet) | Designed in [servers.md](servers.md#host-sanity-checks): hash chains, signed heads, host receipts and cross-checks raise alerts | Detection only. A host can still deny service, and can keep data past expiry without anyone knowing, including under a legal preservation hold (ciphertext only). Operator refusals (denylists, takedowns) come with signed receipts and show as "refused by host operator", not as withholding |
 
 ### The device
 
