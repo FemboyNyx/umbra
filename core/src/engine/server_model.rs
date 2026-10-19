@@ -67,7 +67,7 @@ pub fn sha256_url(b: &[u8]) -> String {
     b64url(&Sha256::digest(b))
 }
 
-fn signed_message(ctx: &[u8], bytes: &[u8]) -> Vec<u8> {
+pub fn signed_message(ctx: &[u8], bytes: &[u8]) -> Vec<u8> {
     let mut m = ctx.to_vec();
     m.extend_from_slice(bytes);
     m
@@ -77,7 +77,7 @@ pub fn ed_public(b64key: &str) -> Result<ed25519::PublicKey> {
     ed25519::PublicKey::try_from_bytes(&unb64(b64key)?).context("invalid ed25519 key")
 }
 
-fn verify(key: &str, ctx: &[u8], bytes: &[u8], sig: &[u8]) -> Result<bool> {
+pub fn verify(key: &str, ctx: &[u8], bytes: &[u8], sig: &[u8]) -> Result<bool> {
     Ok(ed_public(key)?.verify(&signed_message(ctx, bytes), sig))
 }
 

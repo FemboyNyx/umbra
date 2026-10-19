@@ -2,6 +2,7 @@ pub mod core;
 pub mod crypto;
 pub mod epoch;
 pub mod events;
+pub mod host_proto;
 pub mod limits;
 pub mod net;
 pub mod proto;
