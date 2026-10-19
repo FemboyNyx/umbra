@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::api::types::{Contact, ConversationSummary, DeliveryStatus, Message};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -120,6 +120,10 @@ pub struct ContactRow {
     pub pending_identity_key: Option<String>,
     /// Identity key the user refused; presenting it again is ignored silently.
     pub rejected_identity_key: Option<String>,
+    /// Card v2 signature over (`peer_id`, `identity_key`); `None` = legacy.
+    pub card_sig: Option<String>,
+    /// Card v2 signature that came with `pending_identity_key`, if any.
+    pub pending_card_sig: Option<String>,
 }
 
 impl ContactRow {
@@ -136,6 +140,7 @@ impl ContactRow {
             online,
             key_changed: self.pending_identity_key.is_some(),
             pending_identity_key: self.pending_identity_key,
+            signed_card: self.card_sig.is_some(),
         }
     }
 }
@@ -152,11 +157,13 @@ fn row_to_contact(r: &rusqlite::Row<'_>) -> rusqlite::Result<ContactRow> {
         added_at: r.get(6)?,
         pending_identity_key: r.get(7)?,
         rejected_identity_key: r.get(8)?,
+        card_sig: r.get(9)?,
+        pending_card_sig: r.get(10)?,
     })
 }
 
 const CONTACT_COLS: &str =
-    "peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at, pending_identity_key, rejected_identity_key";
+    "peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at, pending_identity_key, rejected_identity_key, card_sig, pending_card_sig";
 
 impl Store {
     /// Open or create `path`, keyed with the raw 32-byte `key`.
@@ -236,10 +243,11 @@ impl Store {
 
     pub fn upsert_contact(&self, c: &ContactRow) -> Result<()> {
         self.c().execute(
-            "INSERT INTO contacts(peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO contacts(peer_id, display_name, identity_key, ed25519_key, addrs, verified, added_at, card_sig)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(peer_id) DO UPDATE SET display_name = excluded.display_name,
-               addrs = excluded.addrs, verified = excluded.verified",
+               addrs = excluded.addrs, verified = excluded.verified,
+               card_sig = COALESCE(excluded.card_sig, contacts.card_sig)",
             params![
                 c.peer_id,
                 c.display_name,
@@ -247,7 +255,8 @@ impl Store {
                 c.ed25519_key,
                 serde_json::to_string(&c.addrs)?,
                 c.verified as i64,
-                c.added_at
+                c.added_at,
+                c.card_sig
             ],
         )?;
         Ok(())
@@ -308,11 +317,28 @@ impl Store {
         Ok(())
     }
 
-    /// Flag a key change (keeps the trusted key in place).
-    pub fn set_pending_key(&self, peer_id: &str, key: &str, now: i64) -> Result<()> {
+    /// Flag a key change (keeps the trusted key in place). `sig` is the card
+    /// v2 signature that came with the new key, if any.
+    pub fn set_pending_key(
+        &self,
+        peer_id: &str,
+        key: &str,
+        sig: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
         self.c().execute(
-            "UPDATE contacts SET pending_identity_key = ?2, key_changed_at = ?3 WHERE peer_id = ?1",
-            params![peer_id, key, now],
+            "UPDATE contacts SET pending_identity_key = ?2, pending_card_sig = ?3, key_changed_at = ?4
+             WHERE peer_id = ?1",
+            params![peer_id, key, sig, now],
+        )?;
+        Ok(())
+    }
+
+    /// Record a (verified) card v2 signature for the trusted key.
+    pub fn set_card_sig(&self, peer_id: &str, sig: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE contacts SET card_sig = ?2 WHERE peer_id = ?1",
+            params![peer_id, sig],
         )?;
         Ok(())
     }
@@ -322,6 +348,7 @@ impl Store {
     pub fn accept_pending_key(&self, peer_id: &str) -> Result<()> {
         let n = self.c().execute(
             "UPDATE contacts SET identity_key = pending_identity_key, pending_identity_key = NULL,
+               card_sig = pending_card_sig, pending_card_sig = NULL,
                rejected_identity_key = NULL, key_changed_at = NULL, verified = 0
              WHERE peer_id = ?1 AND pending_identity_key IS NOT NULL",
             [peer_id],
@@ -336,7 +363,7 @@ impl Store {
     pub fn reject_pending_key(&self, peer_id: &str) -> Result<()> {
         let n = self.c().execute(
             "UPDATE contacts SET rejected_identity_key = pending_identity_key,
-               pending_identity_key = NULL, key_changed_at = NULL
+               pending_identity_key = NULL, pending_card_sig = NULL, key_changed_at = NULL
              WHERE peer_id = ?1 AND pending_identity_key IS NOT NULL",
             [peer_id],
         )?;
@@ -580,10 +607,24 @@ const V2_CONTACT_COLUMNS: &[(&str, &str)] = &[
     ("key_changed_at", "INTEGER"),
 ];
 
+/// Columns added after v1, per table. New tables are plain
+/// `CREATE TABLE IF NOT EXISTS` in [`SCHEMA`]; only columns on existing
+/// tables need listing here.
+const ADDED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
+    ("contacts", V2_CONTACT_COLUMNS),
+    // v3: card v2 signatures.
+    (
+        "contacts",
+        &[("card_sig", "TEXT"), ("pending_card_sig", "TEXT")],
+    ),
+];
+
 /// Bring the schema to [`SCHEMA_VERSION`] in one transaction: the column
 /// additions and the `schema_version` bump commit together or not at all.
 /// Columns are added only if missing (`PRAGMA table_info`), so a database
 /// left half-migrated by an older build, or migrated twice, still opens.
+/// The column check runs on every open (a few pragma reads), so it does
+/// not depend on the recorded version being accurate.
 fn migrate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     let v: i64 = tx
@@ -599,15 +640,15 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     if v > SCHEMA_VERSION {
         bail!("database schema {v} is newer than this build");
     }
-    if v < 2 {
+    for (table, cols) in ADDED_COLUMNS {
         let have: std::collections::HashSet<String> = {
-            let mut st = tx.prepare("SELECT name FROM pragma_table_info('contacts')")?;
-            let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+            let mut st = tx.prepare("SELECT name FROM pragma_table_info(?1)")?;
+            let rows = st.query_map([table], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
-        for (col, ty) in V2_CONTACT_COLUMNS {
+        for (col, ty) in *cols {
             if !have.contains(*col) {
-                tx.execute_batch(&format!("ALTER TABLE contacts ADD COLUMN {col} {ty};"))?;
+                tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {ty};"))?;
             }
         }
     }
@@ -655,6 +696,8 @@ mod tests {
             added_at: 1,
             pending_identity_key: None,
             rejected_identity_key: None,
+            card_sig: None,
+            pending_card_sig: None,
         }
     }
 
@@ -711,14 +754,14 @@ mod tests {
         let c = s.get_contact("p").unwrap().unwrap();
         assert!(c.verified && c.pending_identity_key.is_none());
         assert!(s.accept_pending_key("p").is_err());
-        s.set_pending_key("p", "ik2", 5).unwrap();
+        s.set_pending_key("p", "ik2", None, 5).unwrap();
         s.reject_pending_key("p").unwrap();
         let c = s.get_contact("p").unwrap().unwrap();
         assert_eq!(
             (c.identity_key.as_str(), c.rejected_identity_key.as_deref()),
             ("ik1", Some("ik2"))
         );
-        s.set_pending_key("p", "ik3", 6).unwrap();
+        s.set_pending_key("p", "ik3", None, 6).unwrap();
         s.accept_pending_key("p").unwrap();
         let c = s.get_contact("p").unwrap().unwrap();
         assert_eq!(c.identity_key, "ik3");
@@ -774,7 +817,7 @@ mod tests {
         for (c, _) in V2_CONTACT_COLUMNS {
             assert_eq!(after.iter().filter(|x| x == c).count(), 1, "{c}");
         }
-        s.set_pending_key("p", "ik2", 5).unwrap();
+        s.set_pending_key("p", "ik2", None, 5).unwrap();
         drop(s);
 
         // Version marker lost but all columns present: runs again, no error.

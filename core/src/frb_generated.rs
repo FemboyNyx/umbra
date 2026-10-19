@@ -849,6 +849,7 @@ impl SseDecode for crate::api::types::Contact {
         let mut var_online = <bool>::sse_decode(deserializer);
         let mut var_keyChanged = <bool>::sse_decode(deserializer);
         let mut var_pendingIdentityKey = <Option<String>>::sse_decode(deserializer);
+        let mut var_signedCard = <bool>::sse_decode(deserializer);
         return crate::api::types::Contact {
             peer_id: var_peerId,
             display_name: var_displayName,
@@ -861,6 +862,7 @@ impl SseDecode for crate::api::types::Contact {
             online: var_online,
             key_changed: var_keyChanged,
             pending_identity_key: var_pendingIdentityKey,
+            signed_card: var_signedCard,
         };
     }
 }
@@ -873,12 +875,14 @@ impl SseDecode for crate::api::types::ContactCard {
         let mut var_ed25519Key = <String>::sse_decode(deserializer);
         let mut var_addrs = <Vec<String>>::sse_decode(deserializer);
         let mut var_displayName = <Option<String>>::sse_decode(deserializer);
+        let mut var_sig = <Option<String>>::sse_decode(deserializer);
         return crate::api::types::ContactCard {
             peer_id: var_peerId,
             identity_key: var_identityKey,
             ed25519_key: var_ed25519Key,
             addrs: var_addrs,
             display_name: var_displayName,
+            sig: var_sig,
         };
     }
 }
@@ -1293,6 +1297,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::Contact {
             self.online.into_into_dart().into_dart(),
             self.key_changed.into_into_dart().into_dart(),
             self.pending_identity_key.into_into_dart().into_dart(),
+            self.signed_card.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1312,6 +1317,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::ContactCard {
             self.ed25519_key.into_into_dart().into_dart(),
             self.addrs.into_into_dart().into_dart(),
             self.display_name.into_into_dart().into_dart(),
+            self.sig.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1628,6 +1634,7 @@ impl SseEncode for crate::api::types::Contact {
         <bool>::sse_encode(self.online, serializer);
         <bool>::sse_encode(self.key_changed, serializer);
         <Option<String>>::sse_encode(self.pending_identity_key, serializer);
+        <bool>::sse_encode(self.signed_card, serializer);
     }
 }
 
@@ -1639,6 +1646,7 @@ impl SseEncode for crate::api::types::ContactCard {
         <String>::sse_encode(self.ed25519_key, serializer);
         <Vec<String>>::sse_encode(self.addrs, serializer);
         <Option<String>>::sse_encode(self.display_name, serializer);
+        <Option<String>>::sse_encode(self.sig, serializer);
     }
 }
 

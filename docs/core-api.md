@@ -80,16 +80,48 @@ fn reject_key_change(peer_id: String) -> Result<()>;        // ADDITION (securit
 QR payload:
 
 ```
-umbra://add?peer=<PeerId>&ik=<curve25519 b64>&ed=<ed25519 b64>&addr=<ma1>,<ma2>[&name=<display name>]
+umbra://add?peer=<PeerId>&ik=<curve25519 b64>&ed=<ed25519 b64>&addr=<ma1>,<ma2>[&name=<display name>][&sig=<b64>]
 ```
 
-`parse_qr` checks that `ed` derives `peer` and that `ik` is a valid
-Curve25519 key. Base64 is standard alphabet, unpadded (URL-encoded in the
+`parse_qr` checks that `ed` derives `peer`, that `ik` is a valid
+Curve25519 key and, if `sig` is present, that it is a valid card v2
+signature (see below). Base64 is standard alphabet, unpadded (URL-encoded in the
 query). At most 6 addresses are written.
 
 * `SelfInfo.fingerprint`: our 30-digit half (6 groups of 5).
 * `Contact.safety_number`: 60 digits (12 groups of 5), identical on both
   devices. Show it on the contact screen and let the user mark `verified`.
+
+## Signed contact cards (card v2)
+
+Per [servers.md](servers.md) prerequisite 1, a card binds the Olm identity
+key to the device key:
+
+```
+sig = ed25519_sign(ed, "umbra-card-v2" || PeerId bytes || ik)
+```
+
+* `PeerId bytes` is the binary PeerId (multihash, `PeerId::to_bytes`), `ik`
+  the 32 raw Curve25519 bytes. No length prefixes (the multihash is
+  self-delimiting, `ik` is fixed-size). `sig` is 64 bytes, unpadded base64,
+  in `ContactCard.sig` and the QR's `sig=`.
+* Core signs its own card (`self_info().qr_payload`, every `Hello`).
+* Every card core accepts (`parse_qr`, `add_contact`, `Hello`) is verified
+  when signed. **An invalid signature rejects the card**: `add_contact`
+  errors, `Hello` gets `Rejected(Malformed)`, and no `KeyChanged` is raised
+  (a forged card can't trigger key-change alerts).
+* **Compatibility:** unsigned (v1) cards are still accepted for contacts.
+  `Contact.signed_card` says whether we hold a valid signature; legacy
+  contacts become signed on their next signed `Hello` (same `ik`).
+* **No downgrade:** once a contact is signed, an unsigned card for it is
+  refused (`Rejected(Malformed)` / `add_contact` error).
+* **With KeyChanged:** a validly signed card with a *different* `ik` is
+  still only a key change: never auto-trusted, same flow as below. Its
+  signature is kept with the pending key and becomes the contact's card
+  signature on `accept_key_change`. A key change seen only in a key-claim
+  answer has no signature, so the contact is unsigned after accepting it
+  until the next signed `Hello`.
+* Schema v3 adds `contacts.card_sig` and `contacts.pending_card_sig`.
 
 ## Identity key changes
 
@@ -161,10 +193,11 @@ struct CoreConfig {
     mock: bool,                     // ADDITION, in-memory mock backend
 }
 struct SelfInfo { peer_id, fingerprint, qr_payload, display_name, identity_key, ed25519_key, addrs: Vec<String> }
-struct ContactCard { peer_id, identity_key, ed25519_key, addrs: Vec<String>, display_name: Option<String> }
+struct ContactCard { peer_id, identity_key, ed25519_key, addrs: Vec<String>, display_name: Option<String>,
+                     sig: Option<String> /* card v2, serde(default) */ }
 struct Contact { peer_id, display_name, identity_key, ed25519_key, addrs, verified: bool,
                  safety_number, added_at_ms: i64, online: bool,
-                 key_changed: bool, pending_identity_key: Option<String> }
+                 key_changed: bool, pending_identity_key: Option<String>, signed_card: bool }
 enum KeyChangeSource { Hello, KeyClaim, ContactCard }
 struct Message { id, peer_id, outgoing: bool, body, timestamp_ms: i64, status: DeliveryStatus, read: bool }
 struct ConversationSummary { peer_id, display_name, last_message: Option<Message>, unread_count: u32, updated_at_ms: i64 }
@@ -203,7 +236,8 @@ Errors are `anyhow::Result` (Dart: `AnyhowException` with a message).
 3. Additions: `CoreConfig.listen_addrs`, `CoreConfig.mock`, `network_status()`,
    `SelfInfo.{identity_key, ed25519_key, addrs}`, optional `name=` in the QR,
    `Contact.{safety_number, added_at_ms, online, key_changed, pending_identity_key}`,
-   `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change`.
+   `CoreEvent::KeyChanged`, `accept_key_change`, `reject_key_change`,
+   `ContactCard.sig` / QR `sig=` (card v2), `Contact.signed_card`.
 
 ## Protocol summary
 

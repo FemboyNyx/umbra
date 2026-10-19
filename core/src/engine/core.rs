@@ -205,13 +205,19 @@ impl Core {
 
     pub fn self_card(&self) -> ContactCard {
         let name = self.display_name();
-        ContactCard {
+        let mut card = ContactCard {
             peer_id: self.id.peer_id.to_base58(),
             identity_key: self.id.curve25519_b64(),
             ed25519_key: self.id.ed25519_b64(),
             addrs: self.advertised_addrs(),
             display_name: (!name.is_empty()).then_some(name),
+            sig: None,
+        };
+        // Card v2: bind our Olm identity key to the device key.
+        if let Err(e) = qr::sign_card(&self.id.keypair, &mut card) {
+            tracing::error!("sign own card: {e:#}");
         }
+        card
     }
 
     pub fn self_info(&self) -> SelfInfo {
@@ -254,7 +260,16 @@ impl Core {
     /// A known contact presented `presented_ik` instead of its trusted key.
     /// Never trusts it: flags the contact and emits `KeyChanged` once per
     /// distinct key. Keys the user rejected are ignored silently.
-    fn on_key_mismatch(&self, c: &ContactRow, presented_ik: &str, source: KeyChangeSource) {
+    ///
+    /// `presented_sig` is the card v2 signature that came with the new key
+    /// (already verified by `validate_card`), if any.
+    fn on_key_mismatch(
+        &self,
+        c: &ContactRow,
+        presented_ik: &str,
+        presented_sig: Option<&str>,
+        source: KeyChangeSource,
+    ) {
         if Curve25519PublicKey::from_base64(presented_ik).is_err() {
             return;
         }
@@ -264,9 +279,9 @@ impl Core {
         {
             return;
         }
-        if let Err(e) = self
-            .store
-            .set_pending_key(&c.peer_id, presented_ik, now_ms())
+        if let Err(e) =
+            self.store
+                .set_pending_key(&c.peer_id, presented_ik, presented_sig, now_ms())
         {
             tracing::error!("store pending key: {e:#}");
             return;
@@ -325,8 +340,16 @@ impl Core {
         if let Some(existing) = self.store.get_contact(&card.peer_id)? {
             // Same PeerId implies same ed25519 key (validated), so only the
             // Olm identity key can differ.
+            if existing.card_sig.is_some() && card.sig.is_none() {
+                bail!("unsigned (v1) card for a contact we hold a signed card for; refusing downgrade");
+            }
             if existing.identity_key != card.identity_key {
-                self.on_key_mismatch(&existing, &card.identity_key, KeyChangeSource::ContactCard);
+                self.on_key_mismatch(
+                    &existing,
+                    &card.identity_key,
+                    card.sig.as_deref(),
+                    KeyChangeSource::ContactCard,
+                );
                 bail!(
                     "this contact's identity key changed; compare safety numbers, then call \
                      accept_key_change or reject_key_change"
@@ -353,6 +376,11 @@ impl Core {
             added_at: prev.as_ref().map(|p| p.added_at).unwrap_or_else(now_ms),
             pending_identity_key: prev.as_ref().and_then(|p| p.pending_identity_key.clone()),
             rejected_identity_key: prev.as_ref().and_then(|p| p.rejected_identity_key.clone()),
+            card_sig: card
+                .sig
+                .clone()
+                .or(prev.as_ref().and_then(|p| p.card_sig.clone())),
+            pending_card_sig: prev.as_ref().and_then(|p| p.pending_card_sig.clone()),
         };
         self.store.upsert_contact(&row)?;
         self.lim().pending_requests.remove(&peer);
@@ -723,9 +751,24 @@ impl Core {
         }
         match self.store.get_contact(&card.peer_id) {
             Ok(Some(c)) => {
+                // No downgrade: once we hold a signed card, unsigned ones are refused.
+                if c.card_sig.is_some() && card.sig.is_none() {
+                    return MsgResponse::Rejected(RejectReason::Malformed);
+                }
                 if c.identity_key != card.identity_key {
-                    self.on_key_mismatch(&c, &card.identity_key, KeyChangeSource::Hello);
+                    self.on_key_mismatch(
+                        &c,
+                        &card.identity_key,
+                        card.sig.as_deref(),
+                        KeyChangeSource::Hello,
+                    );
                     return MsgResponse::Rejected(RejectReason::KeyMismatch);
+                }
+                // Upgrade a legacy contact to a signed card (already verified).
+                if let Some(sig) = card.sig.as_deref() {
+                    if c.card_sig.as_deref() != Some(sig) {
+                        let _ = self.store.set_card_sig(&c.peer_id, sig);
+                    }
                 }
                 let addrs = (!card.addrs.is_empty()).then_some(card.addrs.as_slice());
                 let _ = self.store.update_contact_seen(
@@ -949,7 +992,7 @@ impl Core {
                         .store
                         .get_contact(&contact.peer_id)?
                         .unwrap_or(contact.clone());
-                    self.on_key_mismatch(&c, &identity_key, KeyChangeSource::KeyClaim);
+                    self.on_key_mismatch(&c, &identity_key, None, KeyChangeSource::KeyClaim);
                     return Err(DeliverError::Retry(anyhow!(
                         "peer presented a different identity key"
                     )));
@@ -1148,6 +1191,72 @@ mod tests {
     async fn befriend(a: &Arc<Core>, b: &Arc<Core>) {
         a.add_contact(b.self_card(), false).await.unwrap();
         b.add_contact(a.self_card(), false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn card_v2_signatures_are_verified_and_never_downgraded() {
+        let (a, mut rx, _da) = open_lim(
+            1,
+            Limits {
+                hello_burst: 100,
+                ..Limits::default()
+            },
+        );
+        let (b, _rb, _db) = open(2);
+        let pb = b.peer_id();
+        let card_b = b.self_card();
+        assert!(card_b.sig.is_some(), "own card is signed");
+        let ik2 = vodozemac::olm::Account::new().curve25519_key();
+
+        // Import: a card whose ik was swapped under B's signature is rejected
+        // outright (no contact, no KeyChanged).
+        let swapped = ContactCard {
+            identity_key: ik2.to_base64(),
+            ..card_b.clone()
+        };
+        assert!(a.add_contact(swapped.clone(), false).await.is_err());
+        assert!(a.list_contacts().unwrap().is_empty());
+
+        // Legacy (v1) contact: added unsigned, upgraded by B's signed Hello.
+        let v1 = ContactCard {
+            sig: None,
+            ..card_b.clone()
+        };
+        let c = a.add_contact(v1.clone(), false).await.unwrap();
+        assert!(!c.signed_card);
+        assert_eq!(a.handle_msg(pb, hello(&card_b)), MsgResponse::Ok);
+        assert!(a.list_contacts().unwrap()[0].signed_card);
+
+        // Handshake: a forged signature is Malformed and raises nothing.
+        assert_eq!(
+            a.handle_msg(pb, hello(&swapped)),
+            MsgResponse::Rejected(RejectReason::Malformed)
+        );
+        // No downgrade back to unsigned cards, by Hello or by import.
+        assert_eq!(
+            a.handle_msg(pb, hello(&v1)),
+            MsgResponse::Rejected(RejectReason::Malformed)
+        );
+        assert!(a.add_contact(v1, false).await.is_err());
+        assert!(key_changes(&drain(&mut rx)).is_empty());
+        assert!(!a.list_contacts().unwrap()[0].key_changed);
+
+        // A validly signed new key is a KeyChanged; accepting it keeps the
+        // new signature, so the contact stays signed.
+        let mut rotated = ContactCard {
+            identity_key: ik2.to_base64(),
+            ..card_b.clone()
+        };
+        qr::sign_card(&b.id.keypair, &mut rotated).unwrap();
+        assert_eq!(
+            a.handle_msg(pb, hello(&rotated)),
+            MsgResponse::Rejected(RejectReason::KeyMismatch)
+        );
+        assert_eq!(key_changes(&drain(&mut rx)).len(), 1);
+        let c = a.accept_key_change(&pb.to_base58()).unwrap();
+        assert_eq!(c.identity_key, ik2.to_base64());
+        assert!(c.signed_card && !c.verified);
+        assert_eq!(a.handle_msg(pb, hello(&rotated)), MsgResponse::Ok);
     }
 
     #[tokio::test]
@@ -1359,9 +1468,15 @@ mod tests {
         drain(&mut rx);
 
         // B (same device key / PeerId) shows up with a different Olm identity key.
-        let forged = |ik: Curve25519PublicKey| ContactCard {
-            identity_key: ik.to_base64(),
-            ..card_b.clone()
+        // B's device key signs a new Olm identity key (card v2): a validly
+        // signed but changed key must still never be auto-trusted.
+        let forged = |ik: Curve25519PublicKey| {
+            let mut c = ContactCard {
+                identity_key: ik.to_base64(),
+                ..card_b.clone()
+            };
+            qr::sign_card(&b.id.keypair, &mut c).unwrap();
+            c
         };
         let ik2 = vodozemac::olm::Account::new().curve25519_key();
         let r = a.handle_msg(peer_b, MsgRequest::Hello { card: forged(ik2) });

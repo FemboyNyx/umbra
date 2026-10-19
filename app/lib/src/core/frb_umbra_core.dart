@@ -223,6 +223,7 @@ app.ContactCard _card(rust.ContactCard card) {
     ed25519Key: card.ed25519Key,
     addrs: card.addrs,
     displayName: card.displayName,
+    sig: card.sig,
   );
 }
 
@@ -233,6 +234,7 @@ rust.ContactCard _rustCard(app.ContactCard card) {
     ed25519Key: card.ed25519Key,
     addrs: card.addrs,
     displayName: card.displayName,
+    sig: card.sig,
   );
 }
 

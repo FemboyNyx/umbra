@@ -45,16 +45,16 @@ fn fake_identity(name: &str) -> (ContactCard, String) {
         .to_bytes();
     let ik = vodozemac::olm::Account::new().curve25519_key();
     let fp = safety::fingerprint_digits(&ed, ik.as_bytes(), &peer.to_bytes());
-    (
-        ContactCard {
-            peer_id: peer.to_base58(),
-            identity_key: ik.to_base64(),
-            ed25519_key: b64(&ed),
-            addrs: vec![format!("/ip4/192.0.2.1/tcp/4001/p2p/{peer}")],
-            display_name: Some(name.to_string()),
-        },
-        fp,
-    )
+    let mut card = ContactCard {
+        peer_id: peer.to_base58(),
+        identity_key: ik.to_base64(),
+        ed25519_key: b64(&ed),
+        addrs: vec![format!("/ip4/192.0.2.1/tcp/4001/p2p/{peer}")],
+        display_name: Some(name.to_string()),
+        sig: None,
+    };
+    crate::engine::qr::sign_card(&kp, &mut card).expect("sign mock card");
+    (card, fp)
 }
 
 impl MockCore {
@@ -149,15 +149,16 @@ impl MockCore {
         let c = Contact {
             peer_id: card.peer_id.clone(),
             display_name: card.display_name.clone().unwrap_or_default(),
-            identity_key: card.identity_key,
-            ed25519_key: card.ed25519_key,
-            addrs: card.addrs,
+            identity_key: card.identity_key.clone(),
+            ed25519_key: card.ed25519_key.clone(),
+            addrs: card.addrs.clone(),
             verified,
             safety_number: safety::safety_number(&st.fp_digits, &theirs),
             added_at_ms: now_ms(),
             online: true,
             key_changed: false,
             pending_identity_key: None,
+            signed_card: card.sig.is_some(),
         };
         st.contacts.retain(|x| x.peer_id != c.peer_id);
         st.contacts.push(c.clone());

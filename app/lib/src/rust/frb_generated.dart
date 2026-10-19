@@ -841,8 +841,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Contact dco_decode_contact(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 11)
-      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    if (arr.length != 12)
+      throw Exception('unexpected arr length: expect 12 but see ${arr.length}');
     return Contact(
       peerId: dco_decode_String(arr[0]),
       displayName: dco_decode_String(arr[1]),
@@ -855,6 +855,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       online: dco_decode_bool(arr[8]),
       keyChanged: dco_decode_bool(arr[9]),
       pendingIdentityKey: dco_decode_opt_String(arr[10]),
+      signedCard: dco_decode_bool(arr[11]),
     );
   }
 
@@ -862,14 +863,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ContactCard dco_decode_contact_card(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return ContactCard(
       peerId: dco_decode_String(arr[0]),
       identityKey: dco_decode_String(arr[1]),
       ed25519Key: dco_decode_String(arr[2]),
       addrs: dco_decode_list_String(arr[3]),
       displayName: dco_decode_opt_String(arr[4]),
+      sig: dco_decode_opt_String(arr[5]),
     );
   }
 
@@ -1177,6 +1179,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_online = sse_decode_bool(deserializer);
     var var_keyChanged = sse_decode_bool(deserializer);
     var var_pendingIdentityKey = sse_decode_opt_String(deserializer);
+    var var_signedCard = sse_decode_bool(deserializer);
     return Contact(
       peerId: var_peerId,
       displayName: var_displayName,
@@ -1189,6 +1192,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       online: var_online,
       keyChanged: var_keyChanged,
       pendingIdentityKey: var_pendingIdentityKey,
+      signedCard: var_signedCard,
     );
   }
 
@@ -1200,12 +1204,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_ed25519Key = sse_decode_String(deserializer);
     var var_addrs = sse_decode_list_String(deserializer);
     var var_displayName = sse_decode_opt_String(deserializer);
+    var var_sig = sse_decode_opt_String(deserializer);
     return ContactCard(
       peerId: var_peerId,
       identityKey: var_identityKey,
       ed25519Key: var_ed25519Key,
       addrs: var_addrs,
       displayName: var_displayName,
+      sig: var_sig,
     );
   }
 
@@ -1606,6 +1612,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.online, serializer);
     sse_encode_bool(self.keyChanged, serializer);
     sse_encode_opt_String(self.pendingIdentityKey, serializer);
+    sse_encode_bool(self.signedCard, serializer);
   }
 
   @protected
@@ -1616,6 +1623,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.ed25519Key, serializer);
     sse_encode_list_String(self.addrs, serializer);
     sse_encode_opt_String(self.displayName, serializer);
+    sse_encode_opt_String(self.sig, serializer);
   }
 
   @protected
