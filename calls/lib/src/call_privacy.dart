@@ -7,13 +7,12 @@ library;
 
 /// Shown before placing or accepting a call when Tor mode is on, or always
 /// as a first-time disclosure (app decides when to surface).
-const String preCallIpWarning = '''
-Voice and video calls use a direct peer connection when possible. That can '
-'reveal your IP address to the other person, and call media cannot go over Tor.
-
-For stronger network privacy, enable “Relay only” so media goes through a TURN '
-'relay you configure — slower, but it hides your IP from the other peer.
-''';
+const String preCallIpWarning =
+    'Voice and video calls use a direct peer connection when possible. That can '
+    'reveal your IP address to the other person, and call media cannot go over Tor.\n'
+    '\n'
+    'For stronger network privacy, enable “Relay only” so media goes through a TURN '
+    'relay you configure — slower, but it hides your IP from the other peer.\n';
 
 /// Short one-liner for banners / confirm dialogs.
 const String preCallIpWarningShort =
