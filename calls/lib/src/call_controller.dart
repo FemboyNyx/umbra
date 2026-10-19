@@ -118,14 +118,6 @@ class CallController {
     await _dispatchTrusted(msg);
   }
 
-  /// Parse a JSON map that already came from a trusted core Signal event.
-  /// Prefer [handleCoreSignal] at the bridge boundary.
-  Future<void> handleSignal(Map<String, Object?> json) async {
-    final msg = CallSignalMessage.parse(json);
-    if (msg == null) return;
-    await _dispatchTrusted(msg);
-  }
-
   Future<void> _dispatchTrusted(CallSignalMessage msg) async {
     if (msg.toPeerId.isNotEmpty && msg.toPeerId != localPeerId) return;
 
