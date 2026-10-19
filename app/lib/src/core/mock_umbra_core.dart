@@ -80,6 +80,7 @@ class MockUmbraCore implements UmbraCore {
   final List<Contact> _contacts = [];
   final List<Message> _messages = [];
   NetworkInfo _network = const NetworkInfo();
+  var _hardLocked = false;
   final Map<String, String> _pendingSafety = {};
   final Map<String, String> _rejectedKeys = {};
   void Function(CoreEvent event)? _listener;
@@ -161,6 +162,20 @@ class MockUmbraCore implements UmbraCore {
     _requireInit();
     _network = const NetworkInfo();
     _emit(NetworkStatus(_network));
+  }
+
+  @override
+  Future<void> lock() async {
+    _requireInit();
+    _hardLocked = true;
+    await stopNetwork();
+  }
+
+  @override
+  Future<void> unlock() async {
+    _requireInit();
+    _hardLocked = false;
+    await startNetwork();
   }
 
   @override
@@ -310,6 +325,7 @@ class MockUmbraCore implements UmbraCore {
   @override
   Future<String> sendText(String peerId, String body) async {
     _requireInit();
+    if (_hardLocked) throw const UmbraException('Umbra is locked');
     _requireContact(peerId);
     final bytes = utf8.encode(body);
     if (body.trim().isEmpty) {
@@ -512,6 +528,8 @@ class MockUmbraCore implements UmbraCore {
   }
 
   void _emit(CoreEvent event) {
+    // Nothing arrives while hard-locked, except the network-stopped notice.
+    if (_hardLocked && event is! NetworkStatus) return;
     if (!_hasListener) {
       _buffered.add(event);
       return;

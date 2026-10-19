@@ -36,6 +36,16 @@ In Tor mode the call stack uses `setTorMode(true)`. Calls stay relay-only and ar
 
 `start_network` failures are shown as "couldn't start network". The raw error, which can include listen addresses, is debug-only.
 
+## App lock and screen security
+
+Both locks are off until you turn them on in Settings. A PIN or passphrase (4–128 characters) is stored only as an HMAC-SHA256 verifier. That is a UI check, not the Argon2id wrap from `docs/message-protection.md`.
+
+Soft lock waits until Umbra has been in the background for 1 minute, then hides the UI. The core keeps running. Biometrics can open a soft lock when the device offers them (Android). They never open a hard lock. While the UI is locked, the only traffic notice is "New message", with no sender and no text.
+
+Hard lock runs after 1 hour without use, or from Lock now. It calls core `lock()`. That method is not in the FFI: the real backend only stops the network, so nothing new arrives, and the database stays open. The mock does the same and drops events. Unlocking brings the network back. The passphrase is required. Biometrics are refused.
+
+Screen security is off unless you turn it on. The label is "screen security". It is not described as screenshot-proof, and a request for it is a request, not a guarantee. Disappearing chats and the view-once viewer would also turn it on; those screens are not in the app yet. Android sets `FLAG_SECURE` (and registers the API 34 screen-capture callback without showing a notice). Windows uses `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`. Linux cannot block screenshots. The app says so, and covers the window when it loses focus.
+
 ## Codegen
 
 Bindings are already generated under `lib/src/rust/` and `core/src/frb_generated.rs`. Regenerate with codegen **2.13.0** after the Rust API changes:

@@ -18,6 +18,18 @@ abstract class UmbraCore {
 
   Future<void> stopNetwork();
 
+  /// Hard lock. Phase 0's FFI has no `lock()`.
+  ///
+  /// `docs/message-protection.md` says this stops the network, closes
+  /// SQLCipher, and zeroizes `db_key` and the pickle keys. A passphrase
+  /// would also wrap `db_key` with Argon2id. [FrbUmbraCore] can only stop
+  /// the network. [MockUmbraCore] stops the network and drops events.
+  Future<void> lock();
+
+  /// Reverse [lock] as far as the backend can. The real core cannot reopen
+  /// a database it never closed.
+  Future<void> unlock();
+
   /// Subscribe once. A second call replaces the previous listener.
   ///
   /// Call this before [startNetwork].

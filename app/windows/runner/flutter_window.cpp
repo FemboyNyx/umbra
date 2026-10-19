@@ -27,6 +27,8 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   keystore_ = std::make_unique<UmbraKeystore>(
       flutter_controller_->engine()->messenger());
+  screen_ = std::make_unique<UmbraScreenSecurity>(
+      flutter_controller_->engine()->messenger(), GetHandle());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -42,6 +44,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  screen_ = nullptr;
   keystore_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;

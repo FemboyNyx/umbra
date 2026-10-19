@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../lock/app_lock.dart';
 import '../state/umbra_controller.dart';
 import '../theme/umbra_theme.dart';
 import 'contacts_screen.dart';
+import 'lock_screen.dart';
 import 'onboarding_screen.dart';
 import 'umbra_mark.dart';
 
@@ -16,20 +19,37 @@ class UmbraApp extends StatefulWidget {
   State<UmbraApp> createState() => _UmbraAppState();
 }
 
-class _UmbraAppState extends State<UmbraApp> {
+class _UmbraAppState extends State<UmbraApp> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    HardwareKeyboard.instance.addHandler(_onKey);
     widget.controller.addListener(_onChange);
-    if (widget.autoStart && !widget.controller.started) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
+    widget.controller.appLock.addListener(_onChange);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.controller.appLock.applyScreenSecurity();
+      if (widget.autoStart && !widget.controller.started) {
         widget.controller.bootstrap();
-      });
-    }
+      }
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    widget.controller.appLock.noteLifecycle(state);
+  }
+
+  bool _onKey(KeyEvent event) {
+    widget.controller.appLock.noteActivity();
+    return false;
   }
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    WidgetsBinding.instance.removeObserver(this);
+    widget.controller.appLock.removeListener(_onChange);
     widget.controller.removeListener(_onChange);
     super.dispose();
   }
@@ -47,6 +67,24 @@ class _UmbraAppState extends State<UmbraApp> {
       theme: UmbraTheme.light(),
       darkTheme: UmbraTheme.dark(),
       themeMode: controller.settings.themeMode,
+      builder: (context, child) {
+        final lock = controller.appLock;
+        final covered = lock.locked || lock.obscured;
+        return Listener(
+          onPointerDown: (_) => lock.noteActivity(),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              IgnorePointer(
+                ignoring: covered,
+                child: child ?? const SizedBox.shrink(),
+              ),
+              if (lock.locked) _LockLayer(lock: lock),
+              if (lock.obscured) const PrivacyCover(),
+            ],
+          ),
+        );
+      },
       home: _Gate(controller: controller),
     );
   }
@@ -69,6 +107,35 @@ class _Gate extends StatelessWidget {
       return OnboardingScreen(controller: controller);
     }
     return ContactsScreen(controller: controller);
+  }
+}
+
+/// The lock sits above every route, so it needs its own overlay for the
+/// passphrase field.
+class _LockLayer extends StatefulWidget {
+  const _LockLayer({required this.lock});
+
+  final AppLock lock;
+
+  @override
+  State<_LockLayer> createState() => _LockLayerState();
+}
+
+class _LockLayerState extends State<_LockLayer> {
+  late final OverlayEntry _entry = OverlayEntry(
+    builder: (context) =>
+        LockScreen(key: const Key('app-lock'), lock: widget.lock),
+  );
+
+  @override
+  void didUpdateWidget(covariant _LockLayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _entry.markNeedsBuild();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Overlay(initialEntries: [_entry]);
   }
 }
 

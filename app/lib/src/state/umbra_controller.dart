@@ -9,6 +9,8 @@ import '../core/core_errors.dart';
 import '../core/mock_umbra_core.dart';
 import '../core/umbra_core.dart';
 import '../keystore/db_key_store.dart';
+import '../lock/app_lock.dart';
+import '../lock/platform_lock.dart';
 import '../models/core_types.dart';
 import '../settings/settings_store.dart';
 
@@ -19,9 +21,27 @@ class UmbraController extends ChangeNotifier {
     required this.keyStore,
     required this.settings,
     required this.supportDirectory,
-  }) : _core = core;
+    SoftLockBiometric? biometric,
+    ScreenSecurity? screen,
+    bool coverOnBlur = false,
+    String? captureLimit,
+    Duration softLockAfter = const Duration(minutes: 1),
+    Duration hardLockAfter = const Duration(hours: 1),
+  }) : _core = core {
+    appLock = AppLock(
+      settings: settings,
+      core: () => _core,
+      biometric: biometric,
+      screen: screen,
+      coverOnBlur: coverOnBlur,
+      captureLimit: captureLimit,
+      softAfter: softLockAfter,
+      hardAfter: hardLockAfter,
+    );
+  }
 
   UmbraCore _core;
+  late final AppLock appLock;
   final DbKeyStore keyStore;
   final SettingsStore settings;
   final Future<String> Function() supportDirectory;
@@ -421,6 +441,8 @@ class UmbraController extends ChangeNotifier {
   }
 
   void _onEvent(CoreEvent event) {
+    // Hard lock: nothing arrives. NetworkStatus still reports the stop.
+    if (appLock.hardLocked && event is! NetworkStatus) return;
     switch (event) {
       case ContactRequest(:final card):
         if (_dismissed.contains(card.peerId) ||
@@ -431,6 +453,7 @@ class UmbraController extends ChangeNotifier {
         _seenRequests.add(card.peerId);
         pending = [...pending, card];
       case MessageReceived(:final message):
+        if (appLock.softLocked) appLock.noteLockedTraffic();
         unawaited(_refreshThread(message.peerId));
         return;
       case MessageStatusChanged(:final peerId):
@@ -445,6 +468,7 @@ class UmbraController extends ChangeNotifier {
         :final kind,
         :final payload,
       ):
+        if (appLock.hardLocked) return;
         // Sole ingress into calls/. Do not branch on Offer/Answer/ICE here.
         final forward = handleCoreSignal;
         if (forward != null) {
