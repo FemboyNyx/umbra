@@ -28,7 +28,7 @@ If libsecret is missing, Linux writes `{supportDir}/db_key.bin` mode `0600` and 
 
 Every incoming `CoreEvent::Signal` is forwarded only through `handleCoreSignal`. That is the only calls entry point. The app does not branch on Offer, Answer, or ICE.
 
-WebRTC's audio device starts on the first call, not at process launch. If no audio device is available the call fails with "No audio device is available" instead of aborting.
+Chat and contact detail have a Start call button. It uses `CallController.startCall` only after an audio input and output device are present. WebRTC's audio device starts on that first call, not at process launch. If none is found, or opening it fails, the app stays idle and says "No microphone or audio device found" — no ringing signal is sent. If the device disappears after the peer was invited, the call is hung up so they are not left ringing. The button is disabled while Tor has no TURN relay, while a call is already active, and while a safety-number change is pending.
 
 A contact whose identity key changed shows a safety-number warning. Accept trusts the new key and clears verified. Reject keeps the old key.
 

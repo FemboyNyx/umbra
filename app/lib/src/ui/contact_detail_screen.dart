@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../state/umbra_controller.dart';
 import '../theme/umbra_theme.dart';
 import 'key_change_banner.dart';
+import 'start_call_button.dart';
 
 class ContactDetailScreen extends StatelessWidget {
   const ContactDetailScreen({
@@ -31,10 +32,14 @@ class ContactDetailScreen extends StatelessWidget {
     final theme = Theme.of(context);
     final groups = contact.safetyNumber.split(' ');
     return Scaffold(
-      appBar: AppBar(title: Text(contact.label)),
+      appBar: AppBar(
+        title: Text(contact.label),
+        actions: [StartCallButton(controller: controller, peerId: peerId)],
+      ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
         children: [
+          CallStatusBanner(controller: controller, peerId: peerId),
           for (final notice in controller.keyChangeNotices)
             if (notice.peerId == peerId)
               KeyChangeBanner(controller: controller, notice: notice),
